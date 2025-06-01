@@ -1,0 +1,34 @@
+# ESP-IDF build output
+/build/
+sdkconfig.old
+sdkconfig.defaults
+sdkconfig.save
+*.bin
+*.elf
+*.map
+
+# ESP-IDF dependency files
+managed_components/
+
+# VS Code settings
+.vscode/
+
+# Python virtual environments
+.venv/
+env/
+venv/
+
+# ESP-IDF Python tools cache
+__pycache__/
+*.pyc
+
+# ESP-IDF generated files
+.project/
+.cproject/
+.settings/
+*.log
+
+# Misc
+.DS_Store
+.devcontainer/
+Thumbs.db

@@ -1,0 +1,341 @@
+#include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+#include "driver/i2c.h"
+#include "esp_log.h"
+#include "led_strip.h"
+#include "sdkconfig.h"
+
+static const char *TAG = "main";
+
+/* Use project configuration menu (idf.py menuconfig) to choose the GPIO to blink,
+   or you can edit the following line and set a number here.
+*/
+#define BLINK_GPIO CONFIG_BLINK_GPIO
+
+#define I2C_HOST  0
+#define I2C_SDA_GPIO  8   // Default SDA for ESP32-S3
+#define I2C_SCL_GPIO  9   // Default SCL for ESP32-S3
+#define I2C_HZ        400000   // 400kHz
+#define OLED_PIXEL_CLOCK_HZ    400000  // 400kHz
+#define OLED_I2C_ADDR          0x3C    // SH1106 default address
+#define OLED_RESET_GPIO        -1      // No reset pin
+#define OLED_WIDTH             128
+#define OLED_HEIGHT            64
+
+static uint8_t s_led_state = 0;
+// Display buffer size constants
+
+#ifdef CONFIG_BLINK_LED_STRIP
+
+static led_strip_handle_t led_strip;
+
+static void blink_led(void)
+{
+    /* If the addressable LED is enabled */
+    if (s_led_state) {
+        /* Set the LED pixel using RGB from 0 (0%) to 255 (100%) for each color */
+        led_strip_set_pixel(led_strip, 0, 16, 16, 16);
+        /* Refresh the strip to send data */
+        led_strip_refresh(led_strip);
+    } else {
+        /* Set all LED off to clear all pixels */
+        led_strip_clear(led_strip);
+    }
+}
+
+static void configure_led(void)
+{
+    ESP_LOGI(TAG, "Example configured to blink addressable LED!");
+    /* LED strip initialization with the GPIO and pixels number*/
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = BLINK_GPIO,
+        .max_leds = 1, // at least one LED on board
+    };
+#if CONFIG_BLINK_LED_STRIP_BACKEND_RMT
+    led_strip_rmt_config_t rmt_config = {
+        .resolution_hz = 10 * 1000 * 1000, // 10MHz
+        .flags.with_dma = false,
+    };
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
+#elif CONFIG_BLINK_LED_STRIP_BACKEND_SPI
+    led_strip_spi_config_t spi_config = {
+        .spi_bus = SPI2_HOST,
+        .flags.with_dma = true,
+    };
+    ESP_ERROR_CHECK(led_strip_new_spi_device(&strip_config, &spi_config, &led_strip));
+#else
+#error "unsupported LED strip backend"
+#endif
+    /* Set all LED off to clear all pixels */
+    led_strip_clear(led_strip);
+}
+
+#elif CONFIG_BLINK_LED_GPIO
+
+static void blink_led(void)
+{
+    /* Set the GPIO level according to the state (LOW or HIGH)*/
+    gpio_set_level(BLINK_GPIO, s_led_state);
+}
+
+static void configure_led(void)
+{
+    ESP_LOGI(TAG, "Example configured to blink GPIO LED!");
+    gpio_reset_pin(BLINK_GPIO);
+    /* Set the GPIO as a push/pull output */
+    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
+}
+
+#else
+#error "unsupported LED type"
+#endif
+
+static void configure_i2c(void)
+{
+    ESP_LOGI(TAG, "Initialize I2C");
+    i2c_config_t i2c_conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_SDA_GPIO,
+        .scl_io_num = I2C_SCL_GPIO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_HZ,
+    };
+    ESP_ERROR_CHECK(i2c_param_config(I2C_HOST, &i2c_conf));
+    ESP_ERROR_CHECK(i2c_driver_install(I2C_HOST, i2c_conf.mode, 0, 0, 0));
+}
+
+static void sh1106_send_cmd(uint8_t cmd)
+{
+    i2c_cmd_handle_t handle = i2c_cmd_link_create();
+    i2c_master_start(handle);
+    i2c_master_write_byte(handle, OLED_I2C_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(handle, 0x00, true); // Command mode
+    i2c_master_write_byte(handle, cmd, true);
+    i2c_master_stop(handle);
+    ESP_ERROR_CHECK(i2c_master_cmd_begin(I2C_HOST, handle, pdMS_TO_TICKS(100)));
+    i2c_cmd_link_delete(handle);
+}
+
+static void sh1106_send_data(uint8_t data)
+{
+    i2c_cmd_handle_t handle = i2c_cmd_link_create();
+    i2c_master_start(handle);
+    i2c_master_write_byte(handle, OLED_I2C_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(handle, 0x40, true); // Data mode
+    i2c_master_write_byte(handle, data, true);
+    i2c_master_stop(handle);
+    ESP_ERROR_CHECK(i2c_master_cmd_begin(I2C_HOST, handle, pdMS_TO_TICKS(100)));
+    i2c_cmd_link_delete(handle);
+}
+
+static void configure_oled(void)
+{
+    ESP_LOGI(TAG, "Initialize OLED panel");
+
+    // Initialize SH1106
+    sh1106_send_cmd(0xAE); // Display off
+    sh1106_send_cmd(0xD5); // Set oscillator frequency
+    sh1106_send_cmd(0x80);
+    sh1106_send_cmd(0xA8); // Multiplex ratio
+    sh1106_send_cmd(0x3F); // 1/64 duty
+    sh1106_send_cmd(0xD3); // Display offset
+    sh1106_send_cmd(0x00);
+    sh1106_send_cmd(0x40); // Display start line
+    sh1106_send_cmd(0xA1); // Segment remap
+    sh1106_send_cmd(0xC8); // COM direction
+    sh1106_send_cmd(0xDA); // COM pins
+    sh1106_send_cmd(0x12);
+    sh1106_send_cmd(0x81); // Contrast
+    sh1106_send_cmd(0xFF); // Max contrast
+    sh1106_send_cmd(0xD9); // Precharge period
+    sh1106_send_cmd(0xF1);
+    sh1106_send_cmd(0xDB); // VCOMH deselect level
+    sh1106_send_cmd(0x40);
+    sh1106_send_cmd(0xA4); // Display RAM
+    sh1106_send_cmd(0xA6); // Normal display (not inverted)
+    sh1106_send_cmd(0xAF); // Display on
+
+    // Special initialization for SH1106
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, OLED_I2C_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, 0x00, true); // Command mode
+    i2c_master_write_byte(cmd, 0xAE, true); // Display off
+    i2c_master_write_byte(cmd, 0xD5, true); // Set oscillator frequency
+    i2c_master_write_byte(cmd, 0x80, true);
+    i2c_master_write_byte(cmd, 0xA8, true); // Multiplex ratio
+    i2c_master_write_byte(cmd, 0x3F, true); // 1/64 duty
+    i2c_master_write_byte(cmd, 0xD3, true); // Display offset
+    i2c_master_write_byte(cmd, 0x00, true);
+    i2c_master_write_byte(cmd, 0x40, true); // Display start line
+    i2c_master_write_byte(cmd, 0xAD, true); // DC-DC on/off
+    i2c_master_write_byte(cmd, 0x8B, true); // DC-DC enable
+    i2c_master_write_byte(cmd, 0x32, true); // Pump voltage value
+    i2c_master_write_byte(cmd, 0xA1, true); // Segment remap
+    i2c_master_write_byte(cmd, 0xC8, true); // COM direction
+    i2c_master_write_byte(cmd, 0xDA, true); // COM pins
+    i2c_master_write_byte(cmd, 0x12, true);
+    i2c_master_write_byte(cmd, 0x81, true); // Contrast
+    i2c_master_write_byte(cmd, 0xCF, true);
+    i2c_master_write_byte(cmd, 0xA4, true); // Display RAM
+    i2c_master_write_byte(cmd, 0xA6, true); // Normal display
+    i2c_master_write_byte(cmd, 0xD9, true); // Precharge period
+    i2c_master_write_byte(cmd, 0xF1, true);
+    i2c_master_write_byte(cmd, 0xDB, true); // VCOMH deselect level
+    i2c_master_write_byte(cmd, 0x40, true);
+    i2c_master_write_byte(cmd, 0xAF, true); // Display on
+    i2c_master_stop(cmd);
+    ESP_ERROR_CHECK(i2c_master_cmd_begin(I2C_HOST, cmd, pdMS_TO_TICKS(100)));
+    i2c_cmd_link_delete(cmd);
+
+    // Clear screen
+    for (int page = 0; page < 8; page++) {
+        sh1106_send_cmd(0xB0 | page);    // Set page address
+        sh1106_send_cmd(0x02);           // Set lower column address
+        sh1106_send_cmd(0x10);           // Set higher column address
+
+        for (int col = 0; col < 128; col++) {
+            sh1106_send_data(0x00);      // Clear column
+        }
+    }
+}
+
+// Basic 8x8 font bitmap array - first 32 ASCII characters are non-printable
+static const uint8_t FONT_8X8[] = {
+    // Basic ASCII characters from 32 (space) to 90 (Z)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,   // 32 - Space
+    0x00, 0x00, 0x00, 0x4F, 0x4F, 0x00, 0x00, 0x00,   // 33 - !
+    0x00, 0x07, 0x07, 0x00, 0x00, 0x07, 0x07, 0x00,   // 34 - "
+    0x14, 0x7F, 0x7F, 0x14, 0x14, 0x7F, 0x7F, 0x14,   // 35 - #
+    0x24, 0x2E, 0x6B, 0x6B, 0x3A, 0x12, 0x00, 0x00,   // 36 - $
+    0x63, 0x33, 0x18, 0x0C, 0x06, 0x33, 0x63, 0x00,   // 37 - %
+    0x32, 0x7F, 0x4D, 0x4D, 0x77, 0x72, 0x50, 0x00,   // 38 - &
+    0x00, 0x00, 0x07, 0x07, 0x00, 0x00, 0x00, 0x00,   // 39 - '
+    0x00, 0x1C, 0x3E, 0x63, 0x41, 0x00, 0x00, 0x00,   // 40 - (
+    0x00, 0x41, 0x63, 0x3E, 0x1C, 0x00, 0x00, 0x00,   // 41 - )
+    0x08, 0x2A, 0x3E, 0x1C, 0x1C, 0x3E, 0x2A, 0x08,   // 42 - *
+    0x08, 0x08, 0x3E, 0x3E, 0x08, 0x08, 0x00, 0x00,   // 43 - +
+    0x00, 0x80, 0xE0, 0x60, 0x00, 0x00, 0x00, 0x00,   // 44 - ,
+    0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00,   // 45 - -
+    0x00, 0x00, 0x60, 0x60, 0x00, 0x00, 0x00, 0x00,   // 46 - .
+    0x60, 0x30, 0x18, 0x0C, 0x06, 0x03, 0x01, 0x00,   // 47 - /
+    0x3E, 0x7F, 0x71, 0x59, 0x4D, 0x7F, 0x3E, 0x00,   // 48 - 0
+    0x40, 0x42, 0x7F, 0x7F, 0x40, 0x40, 0x00, 0x00,   // 49 - 1
+    0x62, 0x73, 0x59, 0x49, 0x6F, 0x66, 0x00, 0x00,   // 50 - 2
+    0x22, 0x63, 0x49, 0x49, 0x7F, 0x36, 0x00, 0x00,   // 51 - 3
+    0x18, 0x1C, 0x16, 0x13, 0x7F, 0x7F, 0x10, 0x00,   // 52 - 4
+    0x27, 0x67, 0x45, 0x45, 0x7D, 0x39, 0x00, 0x00,   // 53 - 5
+    0x3C, 0x7E, 0x4B, 0x49, 0x79, 0x30, 0x00, 0x00,   // 54 - 6
+    0x03, 0x03, 0x71, 0x79, 0x0F, 0x07, 0x00, 0x00,   // 55 - 7
+    0x36, 0x7F, 0x49, 0x49, 0x7F, 0x36, 0x00, 0x00,   // 56 - 8
+    0x06, 0x4F, 0x49, 0x69, 0x3F, 0x1E, 0x00, 0x00,   // 57 - 9
+    0x00, 0x00, 0x6C, 0x6C, 0x00, 0x00, 0x00, 0x00,   // 58 - :
+    0x00, 0x80, 0xEC, 0x6C, 0x00, 0x00, 0x00, 0x00,   // 59 - ;
+    0x08, 0x1C, 0x36, 0x63, 0x41, 0x00, 0x00, 0x00,   // 60 - <
+    0x14, 0x14, 0x14, 0x14, 0x14, 0x14, 0x00, 0x00,   // 61 - =
+    0x00, 0x41, 0x63, 0x36, 0x1C, 0x08, 0x00, 0x00,   // 62 - >
+    0x02, 0x03, 0x51, 0x59, 0x0F, 0x06, 0x00, 0x00,   // 63 - ?
+    0x3E, 0x7F, 0x41, 0x5D, 0x5D, 0x1F, 0x1E, 0x00,   // 64 - @
+    0x7E, 0x7F, 0x09, 0x09, 0x7F, 0x7E, 0x00, 0x00,   // 65 - A
+    0x41, 0x7F, 0x7F, 0x49, 0x49, 0x7F, 0x36, 0x00,   // 66 - B
+    0x1C, 0x3E, 0x63, 0x41, 0x41, 0x63, 0x22, 0x00,   // 67 - C
+    0x41, 0x7F, 0x7F, 0x41, 0x63, 0x3E, 0x1C, 0x00,   // 68 - D
+    0x41, 0x7F, 0x7F, 0x49, 0x5D, 0x41, 0x63, 0x00,   // 69 - E
+    0x41, 0x7F, 0x7F, 0x49, 0x1D, 0x01, 0x03, 0x00,   // 70 - F
+    0x1C, 0x3E, 0x63, 0x41, 0x51, 0x73, 0x72, 0x00,   // 71 - G
+    0x7F, 0x7F, 0x08, 0x08, 0x7F, 0x7F, 0x00, 0x00,   // 72 - H
+    0x00, 0x41, 0x7F, 0x7F, 0x41, 0x00, 0x00, 0x00,   // 73 - I
+    0x30, 0x70, 0x40, 0x41, 0x7F, 0x3F, 0x01, 0x00,   // 74 - J
+    0x41, 0x7F, 0x7F, 0x08, 0x1C, 0x77, 0x63, 0x00,   // 75 - K
+    0x41, 0x7F, 0x7F, 0x41, 0x40, 0x60, 0x70, 0x00,   // 76 - L
+    0x7F, 0x7F, 0x0E, 0x1C, 0x0E, 0x7F, 0x7F, 0x00,   // 77 - M
+    0x7F, 0x7F, 0x06, 0x0C, 0x18, 0x7F, 0x7F, 0x00,   // 78 - N
+    0x1C, 0x3E, 0x63, 0x41, 0x63, 0x3E, 0x1C, 0x00,   // 79 - O
+    0x41, 0x7F, 0x7F, 0x49, 0x09, 0x0F, 0x06, 0x00,   // 80 - P
+    0x1E, 0x3F, 0x21, 0x71, 0x7F, 0x5E, 0x00, 0x00,   // 81 - Q
+    0x41, 0x7F, 0x7F, 0x09, 0x19, 0x7F, 0x66, 0x00,   // 82 - R
+    0x26, 0x6F, 0x4D, 0x49, 0x59, 0x73, 0x32, 0x00,   // 83 - S
+    0x03, 0x41, 0x7F, 0x7F, 0x41, 0x03, 0x00, 0x00,   // 84 - T
+    0x7F, 0x7F, 0x40, 0x40, 0x7F, 0x7F, 0x00, 0x00,   // 85 - U
+    0x1F, 0x3F, 0x60, 0x60, 0x3F, 0x1F, 0x00, 0x00,   // 86 - V
+    0x7F, 0x7F, 0x30, 0x18, 0x30, 0x7F, 0x7F, 0x00,   // 87 - W
+    0x43, 0x67, 0x3C, 0x18, 0x3C, 0x67, 0x43, 0x00,   // 88 - X
+    0x07, 0x4F, 0x78, 0x78, 0x4F, 0x07, 0x00, 0x00,   // 89 - Y
+    0x47, 0x63, 0x71, 0x59, 0x4D, 0x67, 0x73, 0x00,   // 90 - Z
+};
+
+static void display_text(const char* text, int x, int y)
+{
+    int page = y / 8;  // Each page is 8 pixels high
+    int len = strlen(text);
+
+    // Set page address
+    sh1106_send_cmd(0xB0 | page);
+
+    // Set column address (with offset of 2 for SH1106)
+    sh1106_send_cmd(0x02 + (x & 0x0F));  // Lower nibble of start address + 2
+    sh1106_send_cmd(0x10 + (x >> 4));    // Higher nibble of start address
+
+    // Write data
+    for (int i = 0; i < len && i < 16; i++) {
+        char c = text[i];
+        // Only handle printable ASCII characters (32-90 for now)
+        if (c >= 32 && c <= 90) {
+            uint8_t* char_bitmap = (uint8_t*)&FONT_8X8[(c - 32) * 8];
+            for (int col = 0; col < 8; col++) {
+                sh1106_send_data(char_bitmap[col]);
+            }
+        } else {
+            // For unsupported characters, display spaces
+            for (int col = 0; col < 8; col++) {
+                sh1106_send_data(0x00);
+            }
+        }
+    }
+}
+
+static void i2c_scan(void) {
+    ESP_LOGI(TAG, "Scanning I2C bus...");
+    for (uint8_t i = 0; i < 128; i++) {
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (i << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_stop(cmd);
+        esp_err_t ret = i2c_master_cmd_begin(I2C_HOST, cmd, pdMS_TO_TICKS(50));
+        i2c_cmd_link_delete(cmd);
+
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Found I2C device at address 0x%02x", i);
+        }
+    }
+    ESP_LOGI(TAG, "I2C scan completed");
+}
+
+void app_main(void)
+{
+    // Configure LED
+    configure_led();
+
+    // Initialize I2C
+    configure_i2c();
+    i2c_scan();
+
+    // Initialize OLED display
+    configure_oled();
+
+    // Test the display
+    display_text("HELLO WORLD", 0, 0);
+    display_text("ESP32-S3", 0, 16);
+    display_text("VIBE CODING TEST", 0, 32);
+
+    while (1) {
+        /* Toggle LED state */
+        s_led_state = !s_led_state;
+        blink_led();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}

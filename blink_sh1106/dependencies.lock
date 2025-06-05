@@ -1,4 +1,14 @@
 dependencies:
+  chiehmin/sgp30:
+    component_hash: a3736a8c9494cd72d26bf6a69fcd805c597d7373488e05f377ee0c60539085fa
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.0.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.0
   espressif/led_strip:
     component_hash: 28c6509a727ef74925b372ed404772aeedf11cce10b78c3f69b3c66799095e2d
     dependencies:
@@ -14,7 +24,8 @@ dependencies:
       type: idf
     version: 5.4.1
 direct_dependencies:
+- chiehmin/sgp30
 - espressif/led_strip
-manifest_hash: a9af7824fb34850fbe175d5384052634b3c00880abb2d3a7937e666d07603998
+manifest_hash: 331819ccc258eefe53535b625ef1982eeff6a2e262f4327c58bcde2c6fdd7fff
 target: esp32s3
 version: 2.0.0

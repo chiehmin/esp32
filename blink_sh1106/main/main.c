@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "led_strip.h"
 #include "sdkconfig.h"
+#include "sgp30/sgp30.h"
 
 static const char *TAG = "main";
 
@@ -25,7 +26,15 @@ static const char *TAG = "main";
 #define OLED_WIDTH             128
 #define OLED_HEIGHT            64
 
+// DHT11 definitions
+#define DHT_GPIO 5  // You can change this to any available GPIO
+
 static uint8_t s_led_state = 0;
+typedef struct {
+    float temperature;
+    float humidity;
+} dht11_reading;
+
 // Display buffer size constants
 
 #ifdef CONFIG_BLINK_LED_STRIP
@@ -315,6 +324,108 @@ static void i2c_scan(void) {
     ESP_LOGI(TAG, "I2C scan completed");
 }
 
+static void dht11_init(void)
+{
+    gpio_reset_pin(DHT_GPIO);
+    gpio_set_direction(DHT_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(DHT_GPIO, 1);
+}
+
+static dht11_reading dht11_read(void)
+{
+    dht11_reading reading = {0};
+    uint8_t data[5] = {0};
+    int bit_index = 7;
+    int byte_index = 0;
+
+    // Disable interrupts during timing-critical sections
+    portDISABLE_INTERRUPTS();
+
+    // Start signal
+    gpio_set_direction(DHT_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(DHT_GPIO, 0);
+    esp_rom_delay_us(20000);  // At least 18ms low
+    gpio_set_level(DHT_GPIO, 1);
+    esp_rom_delay_us(40);     // 20-40us high
+    gpio_set_direction(DHT_GPIO, GPIO_MODE_INPUT);
+
+    // DHT response
+    if (gpio_get_level(DHT_GPIO) == 1) {
+        portENABLE_INTERRUPTS();
+        ESP_LOGE(TAG, "DHT11 not responding");
+        return reading;
+    }
+
+    // Wait for DHT11 to pull up
+    esp_rom_delay_us(80);
+
+    // Read 40 bits of data
+    for (int i = 0; i < 40; i++) {
+        // Wait for falling edge (start of bit)
+        int timeout = 0;
+        while (gpio_get_level(DHT_GPIO) == 1) {
+            esp_rom_delay_us(1);
+            timeout++;
+            if (timeout > 100) {
+                portENABLE_INTERRUPTS();
+                ESP_LOGE(TAG, "DHT11 timeout waiting for bit start");
+                return reading;
+            }
+        }
+
+        // Wait for rising edge
+        timeout = 0;
+        while (gpio_get_level(DHT_GPIO) == 0) {
+            esp_rom_delay_us(1);
+            timeout++;
+            if (timeout > 100) {
+                portENABLE_INTERRUPTS();
+                ESP_LOGE(TAG, "DHT11 timeout waiting for bit rise");
+                return reading;
+            }
+        }
+
+        // Wait ~30us and check pin state
+        esp_rom_delay_us(30);
+
+        // If pin is high after 30us, it's a '1' bit
+        if (gpio_get_level(DHT_GPIO)) {
+            data[byte_index] |= (1 << bit_index);
+        }
+
+        // Next bit
+        bit_index--;
+        if (bit_index < 0) {
+            bit_index = 7;
+            byte_index++;
+        }
+    }
+
+    // Re-enable interrupts
+    portENABLE_INTERRUPTS();
+
+    // Verify checksum
+    uint8_t checksum = data[0] + data[1] + data[2] + data[3];
+    if (data[4] == checksum) {
+        reading.humidity = data[0] + (data[1] * 0.1);
+        reading.temperature = data[2] + (data[3] * 0.1);
+
+        // Validate readings are in reasonable range
+        if (reading.temperature >= 0 && reading.temperature <= 50 &&
+            reading.humidity >= 20 && reading.humidity <= 95) {
+            ESP_LOGI(TAG, "DHT11 read success: %.1f°C, %.1f%%", reading.temperature, reading.humidity);
+        } else {
+            ESP_LOGE(TAG, "DHT11 readings out of range: %.1f°C, %.1f%%", reading.temperature, reading.humidity);
+            reading.temperature = 0;
+            reading.humidity = 0;
+        }
+    } else {
+        ESP_LOGE(TAG, "DHT11 checksum error: got %02x, expected %02x", data[4], checksum);
+    }
+
+    return reading;
+}
+
 void app_main(void)
 {
     // Configure LED
@@ -327,15 +438,74 @@ void app_main(void)
     // Initialize OLED display
     configure_oled();
 
-    // Test the display
-    display_text("HELLO WORLD", 0, 0);
-    display_text("ESP32-S3", 0, 16);
-    display_text("VIBE CODING TEST", 0, 32);
+    // Initialize DHT11
+    ESP_LOGI(TAG, "Initializing DHT11 sensor...");
+    dht11_init();
+
+    // Initialize SGP30
+    ESP_LOGI(TAG, "Initializing SGP30 sensor...");
+    sgp30_config_t sgp30_config = {
+        .i2c_master_port = I2C_HOST,
+        .i2c_address = 0x58, // Default SGP30 address
+    };
+    if (sgp30_init(&sgp30_config) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize SGP30");
+        display_text("SGP30 Error!", 0, 0);
+        return;
+    }
+
+    char line[32];
+    uint16_t co2, tvoc;
+    dht11_reading dht;
+
+    uint8_t serial_id[6];
+    if (sgp30_get_serial_id(serial_id) == ESP_OK) {
+        ESP_LOGI(TAG, "Serial ID: %02X%02X%02X%02X%02X%02X\n", serial_id[0],
+                   serial_id[1], serial_id[2], serial_id[3], serial_id[4],
+                   serial_id[5]);
+    }
 
     while (1) {
+        // Read SGP30 data
+        if (sgp30_read_measurements(&co2, &tvoc) == ESP_OK) {
+            // Display CO2 and TVOC values
+            snprintf(line, sizeof(line), "CO2: %d ppm", co2);
+            display_text(line, 0, 0);
+            snprintf(line, sizeof(line), "TVOC: %d ppb", tvoc);
+            display_text(line, 0, 16);
+            ESP_LOGI(TAG, "CO2: %d ppm, TVOC: %d ppb", co2, tvoc);
+        } else {
+            ESP_LOGE(TAG, "Failed to read SGP30");
+            display_text("SGP30 Error", 0, 0);
+            display_text("Check Wiring", 0, 16);
+        }
+
+        // Read DHT11 data (with retry on failure)
+        static float last_valid_temp = 0;
+        static float last_valid_humidity = 0;
+
+        dht = dht11_read();
+        if (dht.temperature != 0 || dht.humidity != 0) {
+            last_valid_temp = dht.temperature;
+            last_valid_humidity = dht.humidity;
+            snprintf(line, sizeof(line), "T:%.1fC H:%.1f%%", dht.temperature, dht.humidity);
+            display_text(line, 0, 32);
+            ESP_LOGI(TAG, "Temp: %.1f°C, Humidity: %.1f%%", dht.temperature, dht.humidity);
+        } else if (last_valid_temp != 0 || last_valid_humidity != 0) {
+            // Show last valid reading if available
+            snprintf(line, sizeof(line), "T:%.1fC* H:%.1f%%*", last_valid_temp, last_valid_humidity);
+            display_text(line, 0, 32);
+            ESP_LOGW(TAG, "Using last valid DHT11 reading");
+        } else {
+            ESP_LOGE(TAG, "Failed to read DHT11");
+            display_text("DHT11 Error", 0, 32);
+        }
+
         /* Toggle LED state */
         s_led_state = !s_led_state;
         blink_led();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        // Wait 2 seconds before next reading (DHT11 needs at least 1s between reads)
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }

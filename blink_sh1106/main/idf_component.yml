@@ -1,2 +1,3 @@
 dependencies:
-  espressif/led_strip: "^2.4.1"
+  espressif/led_strip: ^2.4.1
+  chiehmin/sgp30: ^1.0.0

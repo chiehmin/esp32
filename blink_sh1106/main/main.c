@@ -8,21 +8,20 @@
 #include "led_strip.h"
 #include "sdkconfig.h"
 #include "sgp30/sgp30.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_sh1106.h"
+#include "esp_lcd_panel_vendor.h"
+#include "esp_lcd_panel_ops.h"
 
 static const char *TAG = "main";
 
-/* Use project configuration menu (idf.py menuconfig) to choose the GPIO to blink,
-   or you can edit the following line and set a number here.
-*/
 #define BLINK_GPIO CONFIG_BLINK_GPIO
 
 #define I2C_HOST  0
 #define I2C_SDA_GPIO  8   // Default SDA for ESP32-S3
 #define I2C_SCL_GPIO  9   // Default SCL for ESP32-S3
 #define I2C_HZ        400000   // 400kHz
-#define OLED_PIXEL_CLOCK_HZ    400000  // 400kHz
 #define OLED_I2C_ADDR          0x3C    // SH1106 default address
-#define OLED_RESET_GPIO        -1      // No reset pin
 #define OLED_WIDTH             128
 #define OLED_HEIGHT            64
 
@@ -117,100 +116,52 @@ static void configure_i2c(void)
     ESP_ERROR_CHECK(i2c_driver_install(I2C_HOST, i2c_conf.mode, 0, 0, 0));
 }
 
-static void sh1106_send_cmd(uint8_t cmd)
-{
-    i2c_cmd_handle_t handle = i2c_cmd_link_create();
-    i2c_master_start(handle);
-    i2c_master_write_byte(handle, OLED_I2C_ADDR << 1 | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(handle, 0x00, true); // Command mode
-    i2c_master_write_byte(handle, cmd, true);
-    i2c_master_stop(handle);
-    ESP_ERROR_CHECK(i2c_master_cmd_begin(I2C_HOST, handle, pdMS_TO_TICKS(100)));
-    i2c_cmd_link_delete(handle);
-}
-
-static void sh1106_send_data(uint8_t data)
-{
-    i2c_cmd_handle_t handle = i2c_cmd_link_create();
-    i2c_master_start(handle);
-    i2c_master_write_byte(handle, OLED_I2C_ADDR << 1 | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(handle, 0x40, true); // Data mode
-    i2c_master_write_byte(handle, data, true);
-    i2c_master_stop(handle);
-    ESP_ERROR_CHECK(i2c_master_cmd_begin(I2C_HOST, handle, pdMS_TO_TICKS(100)));
-    i2c_cmd_link_delete(handle);
-}
+static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
+static esp_lcd_panel_handle_t panel_handle = NULL;
+static uint8_t *frame_buffer = NULL;
 
 static void configure_oled(void)
 {
     ESP_LOGI(TAG, "Initialize OLED panel");
 
-    // Initialize SH1106
-    sh1106_send_cmd(0xAE); // Display off
-    sh1106_send_cmd(0xD5); // Set oscillator frequency
-    sh1106_send_cmd(0x80);
-    sh1106_send_cmd(0xA8); // Multiplex ratio
-    sh1106_send_cmd(0x3F); // 1/64 duty
-    sh1106_send_cmd(0xD3); // Display offset
-    sh1106_send_cmd(0x00);
-    sh1106_send_cmd(0x40); // Display start line
-    sh1106_send_cmd(0xA1); // Segment remap
-    sh1106_send_cmd(0xC8); // COM direction
-    sh1106_send_cmd(0xDA); // COM pins
-    sh1106_send_cmd(0x12);
-    sh1106_send_cmd(0x81); // Contrast
-    sh1106_send_cmd(0xFF); // Max contrast
-    sh1106_send_cmd(0xD9); // Precharge period
-    sh1106_send_cmd(0xF1);
-    sh1106_send_cmd(0xDB); // VCOMH deselect level
-    sh1106_send_cmd(0x40);
-    sh1106_send_cmd(0xA4); // Display RAM
-    sh1106_send_cmd(0xA6); // Normal display (not inverted)
-    sh1106_send_cmd(0xAF); // Display on
+    esp_lcd_panel_io_i2c_config_t io_config = {
+        .dev_addr = OLED_I2C_ADDR,
+        .control_phase_bytes = 1,    // Number of bytes for command phase
+        .lcd_cmd_bits = 8,          // Number of bits for command
+        .lcd_param_bits = 8,        // Number of bits for parameter
+        .dc_bit_offset = 6,         // Offset of data/command bit (D/C bit)
+    };
 
-    // Special initialization for SH1106
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, OLED_I2C_ADDR << 1 | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, 0x00, true); // Command mode
-    i2c_master_write_byte(cmd, 0xAE, true); // Display off
-    i2c_master_write_byte(cmd, 0xD5, true); // Set oscillator frequency
-    i2c_master_write_byte(cmd, 0x80, true);
-    i2c_master_write_byte(cmd, 0xA8, true); // Multiplex ratio
-    i2c_master_write_byte(cmd, 0x3F, true); // 1/64 duty
-    i2c_master_write_byte(cmd, 0xD3, true); // Display offset
-    i2c_master_write_byte(cmd, 0x00, true);
-    i2c_master_write_byte(cmd, 0x40, true); // Display start line
-    i2c_master_write_byte(cmd, 0xAD, true); // DC-DC on/off
-    i2c_master_write_byte(cmd, 0x8B, true); // DC-DC enable
-    i2c_master_write_byte(cmd, 0x32, true); // Pump voltage value
-    i2c_master_write_byte(cmd, 0xA1, true); // Segment remap
-    i2c_master_write_byte(cmd, 0xC8, true); // COM direction
-    i2c_master_write_byte(cmd, 0xDA, true); // COM pins
-    i2c_master_write_byte(cmd, 0x12, true);
-    i2c_master_write_byte(cmd, 0x81, true); // Contrast
-    i2c_master_write_byte(cmd, 0xCF, true);
-    i2c_master_write_byte(cmd, 0xA4, true); // Display RAM
-    i2c_master_write_byte(cmd, 0xA6, true); // Normal display
-    i2c_master_write_byte(cmd, 0xD9, true); // Precharge period
-    i2c_master_write_byte(cmd, 0xF1, true);
-    i2c_master_write_byte(cmd, 0xDB, true); // VCOMH deselect level
-    i2c_master_write_byte(cmd, 0x40, true);
-    i2c_master_write_byte(cmd, 0xAF, true); // Display on
-    i2c_master_stop(cmd);
-    ESP_ERROR_CHECK(i2c_master_cmd_begin(I2C_HOST, cmd, pdMS_TO_TICKS(100)));
-    i2c_cmd_link_delete(cmd);
+    // Create panel IO handle
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)I2C_HOST, &io_config, &panel_io_handle));
 
-    // Clear screen
-    for (int page = 0; page < 8; page++) {
-        sh1106_send_cmd(0xB0 | page);    // Set page address
-        sh1106_send_cmd(0x02);           // Set lower column address
-        sh1106_send_cmd(0x10);           // Set higher column address
+    esp_lcd_panel_dev_config_t panel_config = {
+        .bits_per_pixel = 1,
+        .reset_gpio_num = -1,
+        .color_space = ESP_LCD_COLOR_SPACE_MONOCHROME,
+        .bits_per_pixel = 1,
+    };
 
-        for (int col = 0; col < 128; col++) {
-            sh1106_send_data(0x00);      // Clear column
-        }
+    ESP_ERROR_CHECK(esp_lcd_new_panel_sh1106(panel_io_handle, &panel_config, &panel_handle));
+
+    // Initialize the LCD
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
+
+    // Allocate frame buffer
+    frame_buffer = heap_caps_calloc(1, OLED_WIDTH * OLED_HEIGHT / 8, MALLOC_CAP_DMA);
+    if (!frame_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate frame buffer");
+        return;
     }
+
+    // Clear the frame buffer (calloc already zeroed it, but being explicit)
+    memset(frame_buffer, 0, OLED_WIDTH * OLED_HEIGHT / 8);
+
+    // Update the display with the cleared frame buffer
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, OLED_WIDTH, OLED_HEIGHT, frame_buffer));
+    ESP_LOGI(TAG, "OLED display initialized and cleared");
 }
 
 // Basic 8x8 font bitmap array - first 32 ASCII characters are non-printable
@@ -279,32 +230,37 @@ static const uint8_t FONT_8X8[] = {
 
 static void display_text(const char* text, int x, int y)
 {
+    if (!frame_buffer || !panel_handle) {
+        ESP_LOGE(TAG, "Display not initialized");
+        return;
+    }
+
     int page = y / 8;  // Each page is 8 pixels high
     int len = strlen(text);
 
-    // Set page address
-    sh1106_send_cmd(0xB0 | page);
+    // Clear the area we're going to write to
+    memset(frame_buffer + (page * OLED_WIDTH) + x, 0, len * 8);
 
-    // Set column address (with offset of 2 for SH1106)
-    sh1106_send_cmd(0x02 + (x & 0x0F));  // Lower nibble of start address + 2
-    sh1106_send_cmd(0x10 + (x >> 4));    // Higher nibble of start address
-
-    // Write data
-    for (int i = 0; i < len && i < 16; i++) {
+    // Write text to frame buffer
+    for (int i = 0; i < len && (x + i * 8) < OLED_WIDTH; i++) {
         char c = text[i];
         // Only handle printable ASCII characters (32-90 for now)
         if (c >= 32 && c <= 90) {
             uint8_t* char_bitmap = (uint8_t*)&FONT_8X8[(c - 32) * 8];
             for (int col = 0; col < 8; col++) {
-                sh1106_send_data(char_bitmap[col]);
-            }
-        } else {
-            // For unsupported characters, display spaces
-            for (int col = 0; col < 8; col++) {
-                sh1106_send_data(0x00);
+                // Calculate position in frame buffer
+                int buf_pos = (page * OLED_WIDTH) + x + (i * 8) + col;
+                frame_buffer[buf_pos] = char_bitmap[col];
             }
         }
     }
+
+    // Update display using standard panel API
+    // The SH1106 panel driver will handle the low-level I2C commands
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle,
+                                            0, 0,  // Start from display origin
+                                            OLED_WIDTH, OLED_HEIGHT, // Full display dimensions
+                                            frame_buffer)); // Our frame buffer
 }
 
 static void i2c_scan(void) {

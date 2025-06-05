@@ -23,9 +23,17 @@ dependencies:
     source:
       type: idf
     version: 5.4.1
+  tny-robotics/sh1106-esp-idf:
+    component_hash: 7be190d7c58cd635adf8b74b3a841f8245f2f82f36d135a64d8e53cfab39124d
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.0
 direct_dependencies:
 - chiehmin/sgp30
 - espressif/led_strip
-manifest_hash: 331819ccc258eefe53535b625ef1982eeff6a2e262f4327c58bcde2c6fdd7fff
+- tny-robotics/sh1106-esp-idf
+manifest_hash: a4338ddaf3837167a23acd0ecbe02081b7a9e40fd21eee70f0420c8490648788
 target: esp32s3
 version: 2.0.0

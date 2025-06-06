@@ -2,3 +2,4 @@ dependencies:
   espressif/led_strip: ^2.4.1
   chiehmin/sgp30: ^1.0.0
   tny-robotics/sh1106-esp-idf: '*'
+  achimpieters/esp32-dht: ^1.0.2

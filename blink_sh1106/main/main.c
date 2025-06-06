@@ -12,6 +12,7 @@
 #include "esp_lcd_panel_sh1106.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
+#include "dht.h"
 
 static const char *TAG = "main";
 
@@ -26,7 +27,7 @@ static const char *TAG = "main";
 #define OLED_HEIGHT            64
 
 // DHT11 definitions
-#define DHT_GPIO 5  // You can change this to any available GPIO
+#define DHT_GPIO 5  // DHT sensor GPIO pin
 
 static uint8_t s_led_state = 0;
 typedef struct {
@@ -280,103 +281,27 @@ static void i2c_scan(void) {
     ESP_LOGI(TAG, "I2C scan completed");
 }
 
+// Initialize DHT sensor
 static void dht11_init(void)
 {
     gpio_reset_pin(DHT_GPIO);
-    gpio_set_direction(DHT_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(DHT_GPIO, 1);
+    gpio_pullup_en(DHT_GPIO);
 }
 
+// Read DHT sensor data
 static dht11_reading dht11_read(void)
 {
     dht11_reading reading = {0};
-    uint8_t data[5] = {0};
-    int bit_index = 7;
-    int byte_index = 0;
+    float humidity = 0, temperature = 0;
 
-    // Disable interrupts during timing-critical sections
-    portDISABLE_INTERRUPTS();
-
-    // Start signal
-    gpio_set_direction(DHT_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(DHT_GPIO, 0);
-    esp_rom_delay_us(20000);  // At least 18ms low
-    gpio_set_level(DHT_GPIO, 1);
-    esp_rom_delay_us(40);     // 20-40us high
-    gpio_set_direction(DHT_GPIO, GPIO_MODE_INPUT);
-
-    // DHT response
-    if (gpio_get_level(DHT_GPIO) == 1) {
-        portENABLE_INTERRUPTS();
-        ESP_LOGE(TAG, "DHT11 not responding");
-        return reading;
-    }
-
-    // Wait for DHT11 to pull up
-    esp_rom_delay_us(80);
-
-    // Read 40 bits of data
-    for (int i = 0; i < 40; i++) {
-        // Wait for falling edge (start of bit)
-        int timeout = 0;
-        while (gpio_get_level(DHT_GPIO) == 1) {
-            esp_rom_delay_us(1);
-            timeout++;
-            if (timeout > 100) {
-                portENABLE_INTERRUPTS();
-                ESP_LOGE(TAG, "DHT11 timeout waiting for bit start");
-                return reading;
-            }
-        }
-
-        // Wait for rising edge
-        timeout = 0;
-        while (gpio_get_level(DHT_GPIO) == 0) {
-            esp_rom_delay_us(1);
-            timeout++;
-            if (timeout > 100) {
-                portENABLE_INTERRUPTS();
-                ESP_LOGE(TAG, "DHT11 timeout waiting for bit rise");
-                return reading;
-            }
-        }
-
-        // Wait ~30us and check pin state
-        esp_rom_delay_us(30);
-
-        // If pin is high after 30us, it's a '1' bit
-        if (gpio_get_level(DHT_GPIO)) {
-            data[byte_index] |= (1 << bit_index);
-        }
-
-        // Next bit
-        bit_index--;
-        if (bit_index < 0) {
-            bit_index = 7;
-            byte_index++;
-        }
-    }
-
-    // Re-enable interrupts
-    portENABLE_INTERRUPTS();
-
-    // Verify checksum
-    uint8_t checksum = data[0] + data[1] + data[2] + data[3];
-    if (data[4] == checksum) {
-        reading.humidity = data[0] + (data[1] * 0.1);
-        reading.temperature = data[2] + (data[3] * 0.1);
-
-        // Validate readings are in reasonable range
-        if (reading.temperature >= 0 && reading.temperature <= 50 &&
-            reading.humidity >= 20 && reading.humidity <= 95) {
-            ESP_LOGI(TAG, "DHT11 read success: %.1f°C, %.1f%%", reading.temperature, reading.humidity);
-        } else {
-            ESP_LOGE(TAG, "DHT11 readings out of range: %.1f°C, %.1f%%", reading.temperature, reading.humidity);
-            reading.temperature = 0;
-            reading.humidity = 0;
-        }
+    // Read data from the sensor
+    esp_err_t result = dht_read_float_data(DHT_TYPE_DHT11, DHT_GPIO, &humidity, &temperature);
+    if (result == ESP_OK) {
+        reading.temperature = temperature;
+        reading.humidity = humidity;
+        ESP_LOGI(TAG, "DHT11 read success: %.1f°C, %.1f%%", temperature, humidity);
     } else {
-        ESP_LOGE(TAG, "DHT11 checksum error: got %02x, expected %02x", data[4], checksum);
+        ESP_LOGE(TAG, "Failed to read DHT11: %s", esp_err_to_name(result));
     }
 
     return reading;

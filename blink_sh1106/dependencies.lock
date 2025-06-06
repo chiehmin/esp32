@@ -1,4 +1,23 @@
 dependencies:
+  achimpieters/esp32-dht:
+    component_hash: e605fcdad07d9d9ad63fe14585b14bee8b4b6c7862247bf590cae44226f8e09c
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32s2
+    - esp32s3
+    version: 1.0.2
   chiehmin/sgp30:
     component_hash: a3736a8c9494cd72d26bf6a69fcd805c597d7373488e05f377ee0c60539085fa
     dependencies:
@@ -31,9 +50,10 @@ dependencies:
       type: service
     version: 1.0.0
 direct_dependencies:
+- achimpieters/esp32-dht
 - chiehmin/sgp30
 - espressif/led_strip
 - tny-robotics/sh1106-esp-idf
-manifest_hash: a4338ddaf3837167a23acd0ecbe02081b7a9e40fd21eee70f0420c8490648788
+manifest_hash: c202407acd8fd724a934128218aa503acbca0fcf6f08c1930d9d83a4ece8264e
 target: esp32s3
 version: 2.0.0

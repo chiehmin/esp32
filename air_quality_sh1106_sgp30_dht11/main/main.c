@@ -1,56 +1,81 @@
+/**
+ * ESP32 Air Quality Monitor
+ *
+ * This application monitors air quality using:
+ * - SGP30 for CO2 and TVOC measurements
+ * - DHT11 for temperature and humidity
+ * - SH1106 OLED display for output
+ * - Onboard LED for status indication
+ */
+
+/* Standard C includes */
 #include <stdio.h>
 #include <string.h>
+
+/* FreeRTOS includes */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+/* ESP32 driver includes */
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
 #include "led_strip.h"
 #include "sdkconfig.h"
+
+/* Sensor driver includes */
 #include "sgp30/sgp30.h"
+#include "dht.h"
+
+/* Display driver includes */
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_sh1106.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
-#include "dht.h"
 
+/* Constants and definitions */
 static const char *TAG = "main";
 
-#define BLINK_GPIO CONFIG_BLINK_GPIO
+/* GPIO definitions */
+#define BLINK_GPIO      CONFIG_BLINK_GPIO
+#define DHT_GPIO        5               // DHT11 sensor GPIO pin
 
-#define I2C_HOST  0
-#define I2C_SDA_GPIO  8   // Default SDA for ESP32-S3
-#define I2C_SCL_GPIO  9   // Default SCL for ESP32-S3
-#define I2C_HZ        400000   // 400kHz
-#define OLED_I2C_ADDR          0x3C    // SH1106 default address
-#define OLED_WIDTH             128
-#define OLED_HEIGHT            64
+/* I2C definitions */
+#define I2C_HOST        0
+#define I2C_SDA_GPIO    8               // Default SDA for ESP32-S3
+#define I2C_SCL_GPIO    9               // Default SCL for ESP32-S3
+#define I2C_HZ          400000          // 400kHz
 
-// DHT11 definitions
-#define DHT_GPIO 5  // DHT sensor GPIO pin
+/* OLED display definitions */
+#define OLED_I2C_ADDR   0x3C            // SH1106 default address
+#define OLED_WIDTH      128
+#define OLED_HEIGHT     64
 
-static uint8_t s_led_state = 0;
+/* Type definitions */
 typedef struct {
     float temperature;
     float humidity;
 } dht11_reading;
 
-// Display buffer size constants
-
-#ifdef CONFIG_BLINK_LED_STRIP
+/* Global variables */
+static uint8_t s_led_state = 0;
 
 static led_strip_handle_t led_strip;
 
+/**
+ * @brief Toggle the onboard LED state
+ *
+ * When enabled, sets LED to a dim white color (RGB: 16,16,16).
+ * When disabled, turns the LED off.
+ */
 static void blink_led(void)
 {
-    /* If the addressable LED is enabled */
     if (s_led_state) {
-        /* Set the LED pixel using RGB from 0 (0%) to 255 (100%) for each color */
+        // Set LED to dim white (RGB: 16,16,16)
         led_strip_set_pixel(led_strip, 0, 16, 16, 16);
-        /* Refresh the strip to send data */
         led_strip_refresh(led_strip);
     } else {
-        /* Set all LED off to clear all pixels */
+        // Turn LED off
         led_strip_clear(led_strip);
     }
 }
@@ -63,45 +88,21 @@ static void configure_led(void)
         .strip_gpio_num = BLINK_GPIO,
         .max_leds = 1, // at least one LED on board
     };
-#if CONFIG_BLINK_LED_STRIP_BACKEND_RMT
     led_strip_rmt_config_t rmt_config = {
         .resolution_hz = 10 * 1000 * 1000, // 10MHz
         .flags.with_dma = false,
     };
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
-#elif CONFIG_BLINK_LED_STRIP_BACKEND_SPI
-    led_strip_spi_config_t spi_config = {
-        .spi_bus = SPI2_HOST,
-        .flags.with_dma = true,
-    };
-    ESP_ERROR_CHECK(led_strip_new_spi_device(&strip_config, &spi_config, &led_strip));
-#else
-#error "unsupported LED strip backend"
-#endif
+
     /* Set all LED off to clear all pixels */
     led_strip_clear(led_strip);
 }
 
-#elif CONFIG_BLINK_LED_GPIO
-
-static void blink_led(void)
-{
-    /* Set the GPIO level according to the state (LOW or HIGH)*/
-    gpio_set_level(BLINK_GPIO, s_led_state);
-}
-
-static void configure_led(void)
-{
-    ESP_LOGI(TAG, "Example configured to blink GPIO LED!");
-    gpio_reset_pin(BLINK_GPIO);
-    /* Set the GPIO as a push/pull output */
-    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
-}
-
-#else
-#error "unsupported LED type"
-#endif
-
+/**
+ * @brief Initialize and configure the I2C bus
+ *
+ * Sets up I2C in master mode with specified GPIO pins and clock speed.
+ */
 static void configure_i2c(void)
 {
     ESP_LOGI(TAG, "Initialize I2C");
@@ -117,10 +118,17 @@ static void configure_i2c(void)
     ESP_ERROR_CHECK(i2c_driver_install(I2C_HOST, i2c_conf.mode, 0, 0, 0));
 }
 
+/* Display handles */
 static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static uint8_t *frame_buffer = NULL;
 
+/**
+ * @brief Configure the OLED display
+ *
+ * Initializes the SH1106 OLED display with I2C interface and
+ * allocates frame buffer for display operations.
+ */
 static void configure_oled(void)
 {
     ESP_LOGI(TAG, "Initialize OLED panel");
@@ -229,6 +237,16 @@ static const uint8_t FONT_8X8[] = {
     0x47, 0x63, 0x71, 0x59, 0x4D, 0x67, 0x73, 0x00,   // 90 - Z
 };
 
+/**
+ * @brief Display text on the OLED screen
+ *
+ * @param text The string to display
+ * @param x The x coordinate (in pixels)
+ * @param y The y coordinate (in pixels)
+ *
+ * Uses an 8x8 font to render text to the frame buffer and updates the display.
+ * Only supports ASCII characters from 32 (space) to 90 (Z).
+ */
 static void display_text(const char* text, int x, int y)
 {
     if (!frame_buffer || !panel_handle) {
@@ -264,7 +282,13 @@ static void display_text(const char* text, int x, int y)
                                             frame_buffer)); // Our frame buffer
 }
 
-static void i2c_scan(void) {
+/**
+ * @brief Scan I2C bus for connected devices
+ *
+ * Performs a scan of all possible I2C addresses (0-127) and logs found devices.
+ */
+static void i2c_scan(void)
+{
     ESP_LOGI(TAG, "Scanning I2C bus...");
     for (uint8_t i = 0; i < 128; i++) {
         i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -281,14 +305,20 @@ static void i2c_scan(void) {
     ESP_LOGI(TAG, "I2C scan completed");
 }
 
-// Initialize DHT sensor
+/**
+ * @brief Initialize DHT11 temperature/humidity sensor
+ *
+ * Configures GPIO pin and enables pull-up resistor for DHT11 sensor.
+ */
 static void dht11_init(void)
 {
     gpio_reset_pin(DHT_GPIO);
     gpio_pullup_en(DHT_GPIO);
 }
 
-// Read DHT sensor data
+/**
+ * @brief Read temperature and humidity data from DHT11 sensor
+ */
 static dht11_reading dht11_read(void)
 {
     dht11_reading reading = {0};
@@ -307,6 +337,16 @@ static dht11_reading dht11_read(void)
     return reading;
 }
 
+/**
+ * @brief Main application entry point
+ *
+ * Initializes all hardware components and starts the main monitoring loop:
+ * - LED status indicator
+ * - I2C bus for sensors and display
+ * - OLED display
+ * - DHT11 temperature/humidity sensor
+ * - SGP30 air quality sensor
+ */
 void app_main(void)
 {
     // Configure LED
@@ -346,8 +386,9 @@ void app_main(void)
                    serial_id[5]);
     }
 
+    /* Main monitoring loop */
     while (1) {
-        // Read SGP30 data
+        // Read SGP30 air quality data
         if (sgp30_read_measurements(&co2, &tvoc) == ESP_OK) {
             // Display CO2 and TVOC values
             snprintf(line, sizeof(line), "CO2: %d ppm", co2);

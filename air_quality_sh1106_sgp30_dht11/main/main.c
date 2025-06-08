@@ -11,6 +11,7 @@
 /* Standard C includes */
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 /* FreeRTOS includes */
 #include "freertos/FreeRTOS.h"
@@ -28,6 +29,10 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
+
+/* HTTP Server includes */
+#include "esp_http_server.h"
+#include "esp_timer.h"
 
 /* Sensor driver includes */
 #include "sgp30/sgp30.h"
@@ -71,8 +76,17 @@ typedef struct {
 
 /* Global variables */
 static uint8_t s_led_state = 0;
-
 static led_strip_handle_t led_strip;
+
+/* Sensor data variables */
+static SemaphoreHandle_t sensor_mutex;
+static struct {
+    uint16_t co2;
+    uint16_t tvoc;
+    float temperature;
+    float humidity;
+    time_t last_update;
+} sensor_data = {0};
 
 /**
  * @brief Toggle the onboard LED state
@@ -422,6 +436,86 @@ static void wifi_init_sta(void)
 }
 
 /**
+ * @brief Handle Prometheus metrics endpoint request
+ *
+ * Formats current sensor data in Prometheus text format
+ */
+static esp_err_t metrics_get_handler(httpd_req_t *req)
+{
+    char *resp_str = NULL;
+    size_t resp_size = 0;
+
+    // Take mutex to ensure consistent sensor data
+    if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // Calculate response size and allocate buffer
+        resp_size = 2048; // Should be enough for our metrics
+        resp_str = malloc(resp_size);
+
+        if (resp_str) {
+            // Format metrics in Prometheus text format
+            int len = snprintf(resp_str, resp_size,
+                "# HELP air_quality_co2_ppm CO2 concentration in parts per million\n"
+                "# TYPE air_quality_co2_ppm gauge\n"
+                "air_quality_co2_ppm %u\n"
+                "# HELP air_quality_tvoc_ppb Total Volatile Organic Compounds in parts per billion\n"
+                "# TYPE air_quality_tvoc_ppb gauge\n"
+                "air_quality_tvoc_ppb %u\n"
+                "# HELP air_quality_temperature_celsius Temperature in degrees Celsius\n"
+                "# TYPE air_quality_temperature_celsius gauge\n"
+                "air_quality_temperature_celsius %.1f\n"
+                "# HELP air_quality_humidity_percent Relative humidity percentage\n"
+                "# TYPE air_quality_humidity_percent gauge\n"
+                "air_quality_humidity_percent %.1f\n"
+                "# HELP air_quality_last_update_timestamp Unix timestamp of last sensor update\n"
+                "# TYPE air_quality_last_update_timestamp gauge\n"
+                "air_quality_last_update_timestamp %lld\n",
+                sensor_data.co2,
+                sensor_data.tvoc,
+                sensor_data.temperature,
+                sensor_data.humidity,
+                sensor_data.last_update
+            );
+
+            if (len > 0 && len < resp_size) {
+                httpd_resp_set_type(req, "text/plain");
+                httpd_resp_send(req, resp_str, len);
+            }
+            free(resp_str);
+        }
+        xSemaphoreGive(sensor_mutex);
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Start HTTP server and register handlers
+ */
+static httpd_handle_t start_webserver(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    httpd_handle_t server = NULL;
+
+    // Start the httpd server
+    ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
+    if (httpd_start(&server, &config) == ESP_OK) {
+        // Set URI handlers
+        httpd_uri_t metrics_uri = {
+            .uri       = "/metrics",
+            .method    = HTTP_GET,
+            .handler   = metrics_get_handler,
+            .user_ctx  = NULL
+        };
+        ESP_LOGI(TAG, "Registering URI handlers");
+        httpd_register_uri_handler(server, &metrics_uri);
+        return server;
+    }
+
+    ESP_LOGI(TAG, "Error starting server!");
+    return NULL;
+}
+
+/**
  * @brief Main application entry point
  *
  * Initializes all hardware components and starts the main monitoring loop:
@@ -443,8 +537,18 @@ void app_main(void)
     // Initialize OLED display
     configure_oled();
 
+    // Create mutex for sensor data
+    sensor_mutex = xSemaphoreCreateMutex();
+    if (!sensor_mutex) {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        return;
+    }
+
     // Initialize WiFi
     wifi_init_sta();
+
+    // Start HTTP server
+    start_webserver();
 
     // Initialize DHT11
     ESP_LOGI(TAG, "Initializing DHT11 sensor...");
@@ -465,6 +569,8 @@ void app_main(void)
     char line[32];
     uint16_t co2, tvoc;
     dht11_reading dht;
+    float last_valid_temp = 0.0f;
+    float last_valid_humidity = 0.0f;
 
     uint8_t serial_id[6];
     if (sgp30_get_serial_id(serial_id) == ESP_OK) {
@@ -477,6 +583,12 @@ void app_main(void)
     while (1) {
         // Read SGP30 air quality data
         if (sgp30_read_measurements(&co2, &tvoc) == ESP_OK) {
+            xSemaphoreTake(sensor_mutex, portMAX_DELAY);
+            sensor_data.co2 = co2;
+            sensor_data.tvoc = tvoc;
+            sensor_data.last_update = time(NULL);
+            xSemaphoreGive(sensor_mutex);
+
             // Display CO2 and TVOC values
             snprintf(line, sizeof(line), "CO2: %d ppm", co2);
             display_text(line, 0, 0);
@@ -489,12 +601,15 @@ void app_main(void)
             display_text("Check Wiring", 0, 16);
         }
 
-        // Read DHT11 data (with retry on failure)
-        static float last_valid_temp = 0;
-        static float last_valid_humidity = 0;
-
+        // Read DHT11 data
         dht = dht11_read();
         if (dht.temperature != 0 || dht.humidity != 0) {
+            xSemaphoreTake(sensor_mutex, portMAX_DELAY);
+            sensor_data.temperature = dht.temperature;
+            sensor_data.humidity = dht.humidity;
+            sensor_data.last_update = time(NULL);
+            xSemaphoreGive(sensor_mutex);
+
             last_valid_temp = dht.temperature;
             last_valid_humidity = dht.humidity;
             snprintf(line, sizeof(line), "T:%.1fC H:%.1f%%", dht.temperature, dht.humidity);

@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'air_quality'
+    static_configs:
+      - targets: ['192.168.0.18:80']  # Replace with your ESP32's IP address
+    metrics_path: '/metrics'
+    scheme: 'http'

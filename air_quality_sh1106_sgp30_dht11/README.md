@@ -112,6 +112,51 @@ The pixel number indicates the pixel position in the LED strip. For a single LED
   - Check contrast settings
   - Make sure the display is properly powered
 
+## Data Visualization
+
+This project supports data visualization using Prometheus and Grafana. The ESP32 exposes metrics in Prometheus format at the `/metrics` endpoint.
+
+### Setup Prometheus and Grafana
+
+1. Install Docker and Docker Compose if you haven't already
+2. Update the ESP32's IP address in `prometheus.yml`:
+   ```yaml
+   static_configs:
+     - targets: ['your-esp32-ip:80']
+   ```
+3. Start Prometheus and Grafana:
+   ```bash
+   docker-compose up -d
+   ```
+4. Access Grafana at http://localhost:3000
+   - Default credentials: admin/admin
+   - Add Prometheus as a data source:
+     - URL: http://prometheus:9090
+     - Access: Browser
+5. Import the provided dashboard:
+   - Go to Dashboards → Import
+   - Upload the `grafana-dashboard.json` file
+
+### Available Metrics
+
+The following metrics are available:
+- `air_quality_co2_ppm` - CO2 concentration in parts per million
+- `air_quality_tvoc_ppb` - Total Volatile Organic Compounds in parts per billion
+- `air_quality_temperature_celsius` - Temperature in degrees Celsius
+- `air_quality_humidity_percent` - Relative humidity percentage
+- `air_quality_last_update_timestamp` - Unix timestamp of last sensor update
+
+### Troubleshooting Visualization
+
+* If metrics aren't showing up:
+  - Verify the ESP32's IP address in `prometheus.yml`
+  - Check if the `/metrics` endpoint is accessible
+  - Look for errors in Prometheus logs: `docker-compose logs prometheus`
+* If graphs aren't appearing in Grafana:
+  - Verify Prometheus data source is working
+  - Check the time range selection in Grafana
+  - Ensure metrics are being collected in Prometheus
+
 ## Components Used
 
 * [SGP30](https://github.com/chiehmin/esp32-sgp30) - Air quality sensor driver

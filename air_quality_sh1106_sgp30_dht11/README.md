@@ -1,11 +1,17 @@
 | Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
 | ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | -------- | -------- | -------- |
 
-# Blink Example
+# ESP32 Air Quality Monitor
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+This project implements an air quality monitoring system using ESP32. It combines several sensors and a display to provide real-time environmental data monitoring:
 
-This example demonstrates how to blink a LED by using the GPIO driver or using the [led_strip](https://components.espressif.com/component/espressif/led_strip) library if the LED is addressable e.g. [WS2812](https://cdn-shop.adafruit.com/datasheets/WS2812B.pdf). The `led_strip` library is installed via [component manager](main/idf_component.yml).
+- CO2 and TVOC measurements using SGP30 sensor
+- Temperature and humidity monitoring using DHT11 sensor
+- SH1106 OLED display for data visualization
+- WiFi connectivity for potential remote monitoring
+- Onboard LED for status indication
+
+All components are managed via ESP-IDF's component manager.
 
 ## How to Use Example
 
@@ -13,25 +19,42 @@ Before project configuration and build, be sure to set the correct chip target u
 
 ### Hardware Required
 
-* A development board with normal LED or addressable LED on-board (e.g., ESP32-S3-DevKitC, ESP32-C6-DevKitC etc.)
-* A USB cable for Power supply and programming
+* ESP32 development board (ESP32-S3 recommended)
+* SGP30 Air Quality Sensor
+* DHT11 Temperature and Humidity Sensor
+* SH1106 OLED Display (128x64)
+* USB cable for power and programming
 
-See [Development Boards](https://www.espressif.com/en/products/devkits) for more information about it.
+#### Pin Connections
+
+* **I2C Bus**
+  - SDA: GPIO8
+  - SCL: GPIO9
+  - Used by both SGP30 and SH1106 display
+* **DHT11**
+  - Data: GPIO5
+* **LED**
+  - Built-in addressable LED (configured via menuconfig)
+
+See [Development Boards](https://www.espressif.com/en/products/devkits) for more information about ESP32 development boards.
 
 ### Configure the Project
 
-Open the project configuration menu (`idf.py menuconfig`).
+1. **WiFi Configuration**
+   - Copy `main/wifi_credentials.h.template` to `main/wifi_credentials.h`
+   - Edit `wifi_credentials.h` with your WiFi credentials:
+     ```c
+     #define WIFI_SSID       "your_wifi_ssid"
+     #define WIFI_PASS       "your_wifi_password"
+     ```
+   Note: `wifi_credentials.h` is ignored by git to keep credentials secure
 
-In the `Example Configuration` menu:
+2. **Project Configuration**
+   Open the project configuration menu (`idf.py menuconfig`):
 
-* Select the LED type in the `Blink LED type` option.
-  * Use `GPIO` for regular LED
-  * Use `LED strip` for addressable LED
-* If the LED type is `LED strip`, select the backend peripheral
-  * `RMT` is only available for ESP targets with RMT peripheral supported
-  * `SPI` is available for all ESP targets
-* Set the GPIO number used for the signal in the `Blink GPIO number` option.
-* Set the blinking period in the `Blink period in ms` option.
+   * In the `Example Configuration` menu:
+     - Configure the onboard LED type and GPIO
+     - Adjust other project-specific settings if needed
 
 ### Build and Flash
 
@@ -41,21 +64,33 @@ Run `idf.py -p PORT flash monitor` to build, flash and monitor the project.
 
 See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for full steps to configure and use ESP-IDF to build projects.
 
-## Example Output
+## Operation
 
-As you run the example, you will see the LED blinking, according to the previously defined period. For the addressable LED, you can also change the LED color by setting the `led_strip_set_pixel(led_strip, 0, 16, 16, 16);` (LED Strip, Pixel Number, Red, Green, Blue) with values from 0 to 255 in the [source file](main/blink_example_main.c).
+When running, the device will:
 
+1. Initialize all sensors and the display
+2. Connect to configured WiFi network
+3. Display real-time measurements on the OLED screen:
+   - Line 1: CO2 levels (ppm)
+   - Line 2: TVOC levels (ppb)
+   - Line 3: Temperature and Humidity
+   - Line 4: WiFi status and IP address
+
+The onboard LED blinks to indicate the device is operating normally.
+
+Example output in terminal:
 ```text
-I (315) example: Example configured to blink addressable LED!
-I (325) example: Turning the LED OFF!
-I (1325) example: Turning the LED ON!
-I (2325) example: Turning the LED OFF!
-I (3325) example: Turning the LED ON!
-I (4325) example: Turning the LED OFF!
-I (5325) example: Turning the LED ON!
-I (6325) example: Turning the LED OFF!
-I (7325) example: Turning the LED ON!
-I (8325) example: Turning the LED OFF!
+I (315) main: Example configured to blink addressable LED!
+I (325) main: Initialize I2C
+I (332) main: Found I2C device at address 0x3C
+I (332) main: Found I2C device at address 0x58
+I (342) main: Initialize OLED panel
+I (349) main: OLED display initialized and cleared
+I (355) main: Initializing WiFi
+I (362) main: WiFi initialization completed
+I (1325) main: Connected! IP: 192.168.1.100
+I (2325) main: CO2: 400 ppm, TVOC: 0 ppb
+I (2330) main: Temp: 25.0°C, Humidity: 60.0%
 ```
 
 Note: The color order could be different according to the LED model.
@@ -64,6 +99,26 @@ The pixel number indicates the pixel position in the LED strip. For a single LED
 
 ## Troubleshooting
 
-* If the LED isn't blinking, check the GPIO or the LED type selection in the `Example Configuration` menu.
+* If sensors aren't detected, verify I2C connections and addresses:
+  - SGP30 should be at address 0x58
+  - SH1106 should be at address 0x3C
+* If DHT11 readings fail, check GPIO connection and pull-up resistor
+* If WiFi connection fails:
+  - Verify credentials in `wifi_credentials.h`
+  - Check if the network is within range
+  - Ensure the network supports WPA2-PSK
+* If display is not working:
+  - Verify I2C connections
+  - Check contrast settings
+  - Make sure the display is properly powered
 
-For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+## Components Used
+
+* [SGP30](https://github.com/chiehmin/esp32-sgp30) - Air quality sensor driver
+* [DHT11](https://github.com/AchimPieters/esp32-dht) - Temperature/humidity sensor driver
+* [SH1106](https://github.com/TNY-Robotics/sh1106-esp-idf) - OLED display driver
+* [LED Strip](https://components.espressif.com/component/espressif/led_strip) - LED control library
+
+For technical queries about:
+* ESP32 and ESP-IDF: Open an [issue on ESP-IDF](https://github.com/espressif/esp-idf/issues)
+* This project: Open an issue in this repository

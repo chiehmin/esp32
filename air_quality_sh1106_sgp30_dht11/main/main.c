@@ -23,6 +23,12 @@
 #include "led_strip.h"
 #include "sdkconfig.h"
 
+/* WiFi includes */
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "nvs_flash.h"
+
 /* Sensor driver includes */
 #include "sgp30/sgp30.h"
 #include "dht.h"
@@ -50,6 +56,12 @@ static const char *TAG = "main";
 #define OLED_I2C_ADDR   0x3C            // SH1106 default address
 #define OLED_WIDTH      128
 #define OLED_HEIGHT     64
+
+/* Include WiFi credentials */
+#include "wifi_credentials.h"
+
+/* WiFi definitions */
+#define WIFI_MAXIMUM_RETRY  5
 
 /* Type definitions */
 typedef struct {
@@ -338,6 +350,78 @@ static dht11_reading dht11_read(void)
 }
 
 /**
+ * @brief WiFi event handler
+ *
+ * Handles WiFi events like connection, disconnection, etc.
+ * Updates display with connection status.
+ */
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                             int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(TAG, "Connecting to WiFi...");
+        display_text("WiFi Connecting", 0, 48);
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGI(TAG, "Connection failed! Retrying...");
+        display_text("WiFi Failed", 0, 48);
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        char ip_str[32];
+        snprintf(ip_str, sizeof(ip_str), "IP:" IPSTR, IP2STR(&event->ip_info.ip));
+        display_text(ip_str, 0, 48);
+    }
+}
+
+/**
+ * @brief Initialize WiFi in station mode
+ *
+ * Configures and starts WiFi in station mode to connect to the specified access point.
+ */
+static void wifi_init_sta(void)
+{
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_LOGI(TAG, "Initializing WiFi");
+
+    // Initialize TCP/IP adapter
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    // Initialize WiFi with default config
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    // Register event handlers
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+
+    // Configure WiFi station with SSID and password
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+    // Start WiFi
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_LOGI(TAG, "WiFi initialization completed");
+}
+
+/**
  * @brief Main application entry point
  *
  * Initializes all hardware components and starts the main monitoring loop:
@@ -358,6 +442,9 @@ void app_main(void)
 
     // Initialize OLED display
     configure_oled();
+
+    // Initialize WiFi
+    wifi_init_sta();
 
     // Initialize DHT11
     ESP_LOGI(TAG, "Initializing DHT11 sensor...");

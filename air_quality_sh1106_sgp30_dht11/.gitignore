@@ -7,6 +7,9 @@ sdkconfig.save
 *.elf
 *.map
 
+# WiFi credentials
+main/wifi_credentials.h
+
 # ESP-IDF dependency files
 managed_components/
 

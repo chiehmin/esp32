@@ -6,9 +6,12 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - /volume1/docker/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=90d'
     restart: unless-stopped
 
   grafana:
@@ -27,3 +30,4 @@ services:
 
 volumes:
   grafana-storage:
+  prometheus-data:

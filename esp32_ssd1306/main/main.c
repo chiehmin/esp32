@@ -39,7 +39,7 @@
 #include "wifi_credentials.h"
 
 /* Constants and Definitions */
-static const char *TAG = "ESP32_SAMPLE";
+static const char *TAG = "air_quality_monitor";
 
 // GPIO pin definitions
 #define LED_PIN         GPIO_NUM_2      // Built-in LED on most ESP32 boards
@@ -75,10 +75,13 @@ static char ip_address[32] = "";
 static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static uint8_t *frame_buffer = NULL;
+static uint8_t *prev_frame_buffer = NULL;  // Previous frame for comparison
 
 // Forward declarations
 static void configure_oled(void);
 static void display_text(const char* text, int x, int y);
+static void clear_line(int y);
+static void update_display_changes(void);
 static void wifi_init_sta(void);
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 
@@ -130,25 +133,26 @@ static void led_task(void *pvParameters)
  * @brief Display task
  *
  * This task updates the SSD1306 display with system information using frame buffer approach
+ * with optimized updates that only refresh changed areas
  */
 static void display_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Display task started");
 
-    char line_buffer[32];
-
     while (1) {
-        // Clear the frame buffer
-        if (frame_buffer) {
-            memset(frame_buffer, 0, SSD1306_WIDTH * SSD1306_HEIGHT / 8);
-        }
-
-        // Line 1: Title
+        // Line 1: Title (static, only set once)
         display_text("ESP32 Monitor", 0, 0);
 
-        // Line 2: WiFi status
+        // Line 2: WiFi status (clear line first, then update)
+        clear_line(16);
         display_text(wifi_status, 0, 16);
+
+        // Line 3: IP address (clear line first, then update)
+        clear_line(32);
         display_text(ip_address, 0, 32);
+
+        // Now update only the changed parts of the display
+        update_display_changes();
 
         // Update display every 2 seconds
         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -316,8 +320,17 @@ static void configure_oled(void)
         return;
     }
 
-    // Clear the frame buffer (calloc already zeroed it, but being explicit)
+    // Allocate previous frame buffer for comparison
+    prev_frame_buffer = heap_caps_calloc(1, SSD1306_WIDTH * SSD1306_HEIGHT / 8, MALLOC_CAP_DMA);
+    if (!prev_frame_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate previous frame buffer");
+        free(frame_buffer);
+        return;
+    }
+
+    // Clear both frame buffers
     memset(frame_buffer, 0, SSD1306_WIDTH * SSD1306_HEIGHT / 8);
+    memset(prev_frame_buffer, 0, SSD1306_WIDTH * SSD1306_HEIGHT / 8);
 
     // Update the display with the cleared frame buffer
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, SSD1306_WIDTH, SSD1306_HEIGHT, frame_buffer));
@@ -331,13 +344,15 @@ static void configure_oled(void)
  * @param x The x coordinate (in pixels)
  * @param y The y coordinate (in pixels)
  *
- * Uses an 8x8 font to render text to the frame buffer and updates the display.
+ * Uses an 8x8 font to render text to the frame buffer.
  * Supports ASCII characters from 32 (space) to 122 (z).
+ * Note: This function only updates the frame buffer, not the display.
+ * Call update_display_changes() to actually update the display.
  */
 static void display_text(const char* text, int x, int y)
 {
-    if (!frame_buffer || !panel_handle) {
-        ESP_LOGE(TAG, "Display not initialized");
+    if (!frame_buffer) {
+        ESP_LOGE(TAG, "Frame buffer not initialized");
         return;
     }
 
@@ -360,13 +375,61 @@ static void display_text(const char* text, int x, int y)
             }
         }
     }
+}
 
-    // Update display using standard panel API
-    // The SSD1306 panel driver will handle the low-level I2C commands
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle,
-                                            0, 0,  // Start from display origin
-                                            SSD1306_WIDTH, SSD1306_HEIGHT, // Full display dimensions
-                                            frame_buffer)); // Our frame buffer
+/**
+ * @brief Update display with minimal changes
+ *
+ * Compares current frame buffer with previous frame and only updates changed areas
+ */
+static void update_display_changes(void)
+{
+    if (!frame_buffer || !prev_frame_buffer || !panel_handle) {
+        ESP_LOGE(TAG, "Display buffers not initialized");
+        return;
+    }
+
+    bool has_changes = false;
+    size_t buffer_size = SSD1306_WIDTH * SSD1306_HEIGHT / 8;
+
+    // Check if there are any changes using memcmp
+    has_changes = (memcmp(frame_buffer, prev_frame_buffer, buffer_size) != 0);
+
+    // Only update display if there are changes
+    if (has_changes) {
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle,
+                                                0, 0,  // Start from display origin
+                                                SSD1306_WIDTH, SSD1306_HEIGHT, // Full display dimensions
+                                                frame_buffer)); // Our frame buffer
+
+        // Copy current frame to previous frame for next comparison
+        memcpy(prev_frame_buffer, frame_buffer, buffer_size);
+        ESP_LOGI(TAG, "Display updated with changes");
+    } else {
+        ESP_LOGI(TAG, "No display changes detected, skipping update");
+    }
+}
+
+/**
+ * @brief Clear a specific line on the display
+ *
+ * @param y The y coordinate (should be a multiple of 8)
+ */
+static void clear_line(int y)
+{
+    if (!frame_buffer) {
+        ESP_LOGE(TAG, "Frame buffer not initialized");
+        return;
+    }
+
+    int page = y / 8;  // Each page is 8 pixels high
+    if (page < 0 || page >= (SSD1306_HEIGHT / 8)) {
+        ESP_LOGE(TAG, "Invalid page number: %d", page);
+        return;
+    }
+
+    // Clear the entire line (page)
+    memset(frame_buffer + (page * SSD1306_WIDTH), 0, SSD1306_WIDTH);
 }
 
 /**

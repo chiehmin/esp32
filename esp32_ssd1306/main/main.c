@@ -23,10 +23,20 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+
+/* WiFi includes */
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "nvs_flash.h"
+
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_ssd1306.h"
+
+/* Include WiFi credentials */
+#include "wifi_credentials.h"
 
 /* Constants and Definitions */
 static const char *TAG = "ESP32_SAMPLE";
@@ -49,14 +59,17 @@ static const char *TAG = "ESP32_SAMPLE";
 #define SSD1306_WIDTH           128
 #define SSD1306_HEIGHT          64
 
+/* WiFi definitions */
+#define WIFI_MAXIMUM_RETRY      5
+
 // Task priorities
 #define LED_TASK_PRIORITY       2
-#define BUTTON_TASK_PRIORITY    3
 #define DISPLAY_TASK_PRIORITY   2
 
 // Global variables
 static bool led_state = false;
-static int button_press_count = 0;
+static char wifi_status[32] = "WiFi Disconnected";
+static char ip_address[32] = "";
 
 /* Display handles */
 static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
@@ -66,9 +79,11 @@ static uint8_t *frame_buffer = NULL;
 // Forward declarations
 static void configure_oled(void);
 static void display_text(const char* text, int x, int y);
+static void wifi_init_sta(void);
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 
 /**
- * @brief Configure GPIO pins for LED and button
+ * @brief Configure GPIO pins for LED
  */
 static void configure_gpio(void)
 {
@@ -83,16 +98,6 @@ static void configure_gpio(void)
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&led_config);
-
-    // Configure button pin as input with pull-up
-    gpio_config_t button_config = {
-        .pin_bit_mask = (1ULL << BUTTON_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&button_config);
 
     // Initialize LED to OFF
     gpio_set_level(LED_PIN, 0);
@@ -122,60 +127,6 @@ static void led_task(void *pvParameters)
 }
 
 /**
- * @brief Button monitoring task
- *
- * This task monitors button presses and prints count to console
- */
-static void button_task(void *pvParameters)
-{
-    ESP_LOGI(TAG, "Button task started");
-
-    bool last_button_state = true;  // Pull-up means button not pressed = 1
-    bool current_button_state;
-
-    while (1) {
-        current_button_state = gpio_get_level(BUTTON_PIN);
-
-        // Detect button press (falling edge: 1 -> 0)
-        if (last_button_state && !current_button_state) {
-            button_press_count++;
-            ESP_LOGI(TAG, "Button pressed! Count: %d", button_press_count);
-
-            // Simple debounce delay
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-
-        last_button_state = current_button_state;
-
-        // Check button state every 10ms
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
-
-/**
- * @brief System status task
- *
- * This task prints system information periodically
- */
-static void status_task(void *pvParameters)
-{
-    ESP_LOGI(TAG, "Status task started");
-
-    while (1) {
-        // Print system information every 10 seconds
-        ESP_LOGI(TAG, "=== System Status ===");
-        ESP_LOGI(TAG, "Uptime: %lld seconds", esp_timer_get_time() / 1000000);
-        ESP_LOGI(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
-        ESP_LOGI(TAG, "Button presses: %d", button_press_count);
-        ESP_LOGI(TAG, "LED state: %s", led_state ? "ON" : "OFF");
-        ESP_LOGI(TAG, "==================");
-
-        // Wait for 10 seconds
-        vTaskDelay(pdMS_TO_TICKS(10000));
-    }
-}
-
-/**
  * @brief Display task
  *
  * This task updates the SSD1306 display with system information using frame buffer approach
@@ -195,25 +146,9 @@ static void display_task(void *pvParameters)
         // Line 1: Title
         display_text("ESP32 Monitor", 0, 0);
 
-        // Line 2: Uptime
-        uint64_t uptime_seconds = esp_timer_get_time() / 1000000;
-        snprintf(line_buffer, sizeof(line_buffer), "Time: %llu s", uptime_seconds);
-        display_text(line_buffer, 0, 8);
-
-        // Line 3: Button count
-        snprintf(line_buffer, sizeof(line_buffer), "Button: %d", button_press_count);
-        display_text(line_buffer, 0, 16);
-
-        // Line 4: LED status
-        snprintf(line_buffer, sizeof(line_buffer), "LED: %s", led_state ? "ON" : "OFF");
-        display_text(line_buffer, 0, 24);
-
-        // Line 5: Free heap
-        snprintf(line_buffer, sizeof(line_buffer), "Heap: %lu B", esp_get_free_heap_size());
-        display_text(line_buffer, 0, 32);
-
-        ESP_LOGI(TAG, "Display updated - LED: %s, Button: %d, Uptime: %llu",
-                 led_state ? "ON" : "OFF", button_press_count, uptime_seconds);
+        // Line 2: WiFi status
+        display_text(wifi_status, 0, 16);
+        display_text(ip_address, 0, 32);
 
         // Update display every 2 seconds
         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -435,6 +370,77 @@ static void display_text(const char* text, int x, int y)
 }
 
 /**
+ * @brief WiFi event handler
+ *
+ * Handles WiFi connection events and updates display status
+ */
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                             int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(TAG, "Connecting to WiFi...");
+        strcpy(wifi_status, "WiFi Connecting");
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGI(TAG, "Connection failed! Retrying...");
+        strcpy(wifi_status, "WiFi Failed");
+        strcpy(ip_address, "");  // Clear IP address
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        strcpy(wifi_status, "WiFi Connected");
+        snprintf(ip_address, sizeof(ip_address), "IP:" IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+/**
+ * @brief Initialize WiFi in station mode
+ *
+ * Configures and starts WiFi in station mode to connect to the specified access point.
+ */
+static void wifi_init_sta(void)
+{
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_LOGI(TAG, "Initializing WiFi");
+
+    // Initialize TCP/IP adapter
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    // Initialize WiFi with default config
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    // Register event handlers
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+
+    // Configure WiFi station with SSID and password
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+    // Start WiFi
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_LOGI(TAG, "WiFi initialization completed");
+}
+
+/**
  * @brief Main application entry point
  */
 void app_main(void)
@@ -450,13 +456,14 @@ void app_main(void)
 
     // Show initial test message
     display_text("SSD1306 Ready!", 0, 0);
-    ESP_LOGI(TAG, "Initial test message displayed");
+    display_text("Starting WiFi...", 0, 16);
     vTaskDelay(pdMS_TO_TICKS(2000)); // Show for 2 seconds
+
+    // Initialize WiFi
+    wifi_init_sta();
 
     // Create tasks
     xTaskCreate(led_task, "led_task", 2048, NULL, LED_TASK_PRIORITY, NULL);
-    xTaskCreate(button_task, "button_task", 2048, NULL, BUTTON_TASK_PRIORITY, NULL);
-    xTaskCreate(status_task, "status_task", 4096, NULL, 1, NULL);
     xTaskCreate(display_task, "display_task", 4096, NULL, DISPLAY_TASK_PRIORITY, NULL);
 
     ESP_LOGI(TAG, "All tasks created successfully");

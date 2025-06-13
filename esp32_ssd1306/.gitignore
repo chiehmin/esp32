@@ -127,4 +127,4 @@ tramp
 .\#*
 
 # Custom project files (add your own)
-# wifi_credentials.h  # Uncomment if you want to ignore WiFi credentials
+wifi_credentials.h

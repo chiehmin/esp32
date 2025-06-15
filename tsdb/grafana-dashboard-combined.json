@@ -93,7 +93,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "air_quality_co2_ppm",
+          "expr": "air_quality_co2_ppm{job=\"esp32s3_air_quality\"}",
           "legendFormat": "SGP30 CO2",
           "range": true,
           "refId": "B"
@@ -163,7 +163,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "air_quality_tvoc_ppb",
+          "expr": "air_quality_tvoc_ppb{job=\"esp32s3_air_quality\"}",
           "legendFormat": "SGP30 TVOC",
           "range": true,
           "refId": "A"
@@ -268,7 +268,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "air_quality_temperature_celsius",
+          "expr": "air_quality_temperature_celsius{job=\"esp32s3_air_quality\"}",
           "legendFormat": "DHT11 Temperature",
           "range": true,
           "refId": "B"
@@ -373,7 +373,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "air_quality_humidity_percent",
+          "expr": "air_quality_humidity_percent{job=\"esp32s3_air_quality\"}",
           "legendFormat": "DHT11 Humidity",
           "range": true,
           "refId": "B"
@@ -474,7 +474,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "air_quality_co2_ppm",
+          "expr": "air_quality_co2_ppm{job=\"esp32s3_air_quality\"}",
           "legendFormat": "SGP30 CO2 (Calculated)",
           "range": true,
           "refId": "B"

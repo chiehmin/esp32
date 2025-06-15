@@ -30,6 +30,9 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 
+/* HTTP Server includes */
+#include "esp_http_server.h"
+
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
@@ -75,6 +78,7 @@ static bool led_state = false;
 static char wifi_status[32] = "WiFi Disconnected";
 static char ip_address[32] = "";
 static scd41_data_t sensor_data = {0};
+static httpd_handle_t server = NULL;
 
 /* Display handles */
 static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
@@ -89,6 +93,9 @@ static void clear_line(int y);
 static void update_display_changes(void);
 static void wifi_init_sta(void);
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+static void sensor_task(void *pvParameters);
+static esp_err_t metrics_get_handler(httpd_req_t *req);
+static httpd_handle_t start_webserver(void);
 static void sensor_task(void *pvParameters);
 
 /**
@@ -482,6 +489,9 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
         strcpy(wifi_status, "WiFi Connected");
         snprintf(ip_address, sizeof(ip_address), "IP:" IPSTR, IP2STR(&event->ip_info.ip));
+
+        // Start HTTP server
+        start_webserver();
     }
 }
 
@@ -572,6 +582,70 @@ static void sensor_task(void *pvParameters)
         // SCD41 provides new data every 5 seconds
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
+}
+
+/**
+ * @brief HTTP handler for /metrics endpoint
+ *
+ * Formats current sensor data in Prometheus text format with scd41_ prefix
+ */
+static esp_err_t metrics_get_handler(httpd_req_t *req)
+{
+    char resp_str[1024];
+
+    // Format metrics in Prometheus text format with scd41_ prefix to differentiate from ESP32S3
+    int len = snprintf(resp_str, sizeof(resp_str),
+        "# HELP scd41_temperature_celsius Temperature in Celsius from SCD41 sensor\n"
+        "# TYPE scd41_temperature_celsius gauge\n"
+        "scd41_temperature_celsius %.2f\n"
+        "# HELP scd41_humidity_percent Relative humidity percentage from SCD41 sensor\n"
+        "# TYPE scd41_humidity_percent gauge\n"
+        "scd41_humidity_percent %.2f\n"
+        "# HELP scd41_co2_ppm CO2 concentration in ppm from SCD41 sensor\n"
+        "# TYPE scd41_co2_ppm gauge\n"
+        "scd41_co2_ppm %" PRIu16 "\n"
+        "# HELP esp32_uptime_seconds ESP32 uptime in seconds\n"
+        "# TYPE esp32_uptime_seconds counter\n"
+        "esp32_uptime_seconds %llu\n"
+        "# HELP esp32_free_heap_bytes Free heap memory in bytes\n"
+        "# TYPE esp32_free_heap_bytes gauge\n"
+        "esp32_free_heap_bytes %" PRIu32 "\n",
+        sensor_data.temperature,
+        sensor_data.humidity,
+        sensor_data.co2_ppm,
+        esp_timer_get_time() / 1000000ULL,
+        esp_get_free_heap_size()
+    );
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, resp_str, len);
+    return ESP_OK;
+}
+
+/**
+ * @brief Start HTTP server and register handlers
+ */
+static httpd_handle_t start_webserver(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.lru_purge_enable = true;
+
+    ESP_LOGI(TAG, "Starting HTTP server on port: '%d'", config.server_port);
+    if (httpd_start(&server, &config) == ESP_OK) {
+        // Set URI handlers
+        httpd_uri_t metrics_uri = {
+            .uri       = "/metrics",
+            .method    = HTTP_GET,
+            .handler   = metrics_get_handler,
+            .user_ctx  = NULL
+        };
+        ESP_LOGI(TAG, "Registering URI handlers");
+        httpd_register_uri_handler(server, &metrics_uri);
+        return server;
+    }
+
+    ESP_LOGI(TAG, "Error starting HTTP server!");
+    return NULL;
 }
 
 /**

@@ -59,17 +59,35 @@ static const char *TAG = "air_quality_monitor";
 #define SSD1306_WIDTH           128
 #define SSD1306_HEIGHT          64
 
+// SCD41 definitions
+#define SCD41_I2C_ADDR          0x62    // SCD41 I2C address
+#define SCD41_START_MEASUREMENT 0x21B1  // Start periodic measurement
+#define SCD41_STOP_MEASUREMENT  0x3F86  // Stop measurement
+#define SCD41_READ_MEASUREMENT  0xEC05  // Read measurement
+#define SCD41_GET_SERIAL_NUMBER 0x3682  // Get serial number
+#define SCD41_RESET             0x3646  // Soft reset
+
 /* WiFi definitions */
 #define WIFI_MAXIMUM_RETRY      5
 
 // Task priorities
 #define LED_TASK_PRIORITY       2
 #define DISPLAY_TASK_PRIORITY   2
+#define SENSOR_TASK_PRIORITY    3
+
+// SCD41 sensor data structure
+typedef struct {
+    uint16_t co2_ppm;
+    float temperature;
+    float humidity;
+    bool data_ready;
+} scd41_data_t;
 
 // Global variables
 static bool led_state = false;
 static char wifi_status[32] = "WiFi Disconnected";
 static char ip_address[32] = "";
+static scd41_data_t sensor_data = {0};
 
 /* Display handles */
 static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
@@ -84,6 +102,14 @@ static void clear_line(int y);
 static void update_display_changes(void);
 static void wifi_init_sta(void);
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+
+// SCD41 sensor functions
+static esp_err_t scd41_write_command(uint16_t command);
+static esp_err_t scd41_read_data(uint8_t *data, size_t length);
+static esp_err_t scd41_init(void);
+static esp_err_t scd41_start_measurement(void);
+static esp_err_t scd41_read_measurement(scd41_data_t *data);
+static void sensor_task(void *pvParameters);
 
 /**
  * @brief Configure GPIO pins for LED
@@ -139,17 +165,39 @@ static void display_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Display task started");
 
+    char line_buffer[32];
+
     while (1) {
         // Line 1: Title (static, only set once)
-        display_text("ESP32 Monitor", 0, 0);
+        display_text("Air Quality", 0, 0);
 
-        // Line 2: WiFi status (clear line first, then update)
+        // Line 2: CO2 level
         clear_line(16);
-        display_text(wifi_status, 0, 16);
+        if (sensor_data.data_ready) {
+            snprintf(line_buffer, sizeof(line_buffer), "CO2: %d ppm", sensor_data.co2_ppm);
+        } else {
+            snprintf(line_buffer, sizeof(line_buffer), "CO2: --- ppm");
+        }
+        display_text(line_buffer, 0, 16);
 
-        // Line 3: IP address (clear line first, then update)
+        // Line 3: Temperature and Humidity
         clear_line(32);
-        display_text(ip_address, 0, 32);
+        if (sensor_data.data_ready) {
+            snprintf(line_buffer, sizeof(line_buffer), "T:%.1fC, H:%.1f%%", sensor_data.temperature, sensor_data.humidity);
+        } else {
+            snprintf(line_buffer, sizeof(line_buffer), "T:--.-C H:--.%%");
+        }
+        display_text(line_buffer, 0, 32);
+
+        // Line 4: WiFi status
+        clear_line(48);
+        if (strlen(ip_address) > 0) {
+            // Show IP if connected
+            display_text(ip_address, 0, 48);
+        } else {
+            // Show WiFi status if not connected
+            display_text(wifi_status, 0, 48);
+        }
 
         // Now update only the changed parts of the display
         update_display_changes();
@@ -504,6 +552,203 @@ static void wifi_init_sta(void)
 }
 
 /**
+ * @brief Calculate CRC8 for SCD41 communication
+ */
+static uint8_t scd41_crc8(const uint8_t *data, size_t length)
+{
+    uint8_t crc = 0xFF;
+    for (size_t i = 0; i < length; i++) {
+        crc ^= data[i];
+        for (uint8_t bit = 8; bit > 0; --bit) {
+            if (crc & 0x80) {
+                crc = (crc << 1) ^ 0x31;
+            } else {
+                crc = (crc << 1);
+            }
+        }
+    }
+    return crc;
+}
+
+/**
+ * @brief Write a command to SCD41 sensor
+ */
+static esp_err_t scd41_write_command(uint16_t command)
+{
+    uint8_t cmd_buffer[2];
+    cmd_buffer[0] = (command >> 8) & 0xFF;  // High byte
+    cmd_buffer[1] = command & 0xFF;         // Low byte
+
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (SCD41_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write(cmd, cmd_buffer, 2, true);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
+
+/**
+ * @brief Read data from SCD41 sensor
+ */
+static esp_err_t scd41_read_data(uint8_t *data, size_t length)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (SCD41_I2C_ADDR << 1) | I2C_MASTER_READ, true);
+    i2c_master_read(cmd, data, length, I2C_MASTER_LAST_NACK);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
+
+/**
+ * @brief Initialize SCD41 sensor
+ */
+static esp_err_t scd41_init(void)
+{
+    ESP_LOGI(TAG, "Initializing SCD41 sensor...");
+
+    // Stop any ongoing measurement first
+    esp_err_t ret = scd41_write_command(SCD41_STOP_MEASUREMENT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to stop SCD41 measurement: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(500));  // Wait for stop command
+
+    // Get serial number to verify communication
+    ret = scd41_write_command(SCD41_GET_SERIAL_NUMBER);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to request SCD41 serial number: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    uint8_t serial_data[9];  // 3 words * 3 bytes each (2 data + 1 CRC)
+    ret = scd41_read_data(serial_data, 9);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "SCD41 serial number: %02X%02X%02X%02X%02X%02X",
+                 serial_data[0], serial_data[1], serial_data[3], serial_data[4], serial_data[6], serial_data[7]);
+    }
+
+    ESP_LOGI(TAG, "SCD41 sensor initialized successfully");
+    return ESP_OK;
+}
+
+/**
+ * @brief Start periodic measurement on SCD41
+ */
+static esp_err_t scd41_start_measurement(void)
+{
+    esp_err_t ret = scd41_write_command(SCD41_START_MEASUREMENT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start SCD41 measurement: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "SCD41 measurement started");
+    return ESP_OK;
+}
+
+/**
+ * @brief Read measurement data from SCD41
+ */
+static esp_err_t scd41_read_measurement(scd41_data_t *data)
+{
+    if (!data) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Send read measurement command
+    esp_err_t ret = scd41_write_command(SCD41_READ_MEASUREMENT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send read command: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));  // Wait for data to be ready
+
+    // Read 9 bytes: 3 measurements * (2 data bytes + 1 CRC byte)
+    uint8_t buffer[9];
+    ret = scd41_read_data(buffer, 9);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read measurement data: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Verify CRC for each measurement
+    for (int i = 0; i < 3; i++) {
+        uint8_t expected_crc = scd41_crc8(&buffer[i * 3], 2);
+        if (buffer[i * 3 + 2] != expected_crc) {
+            ESP_LOGE(TAG, "CRC mismatch for measurement %d", i);
+            return ESP_ERR_INVALID_CRC;
+        }
+    }
+
+    // Parse CO2 concentration (ppm)
+    data->co2_ppm = (buffer[0] << 8) | buffer[1];
+
+    // Parse temperature (°C)
+    uint16_t temp_raw = (buffer[3] << 8) | buffer[4];
+    data->temperature = -45.0f + 175.0f * ((float)temp_raw / 65535.0f);
+
+    // Parse humidity (%RH)
+    uint16_t hum_raw = (buffer[6] << 8) | buffer[7];
+    data->humidity = 100.0f * ((float)hum_raw / 65535.0f);
+
+    data->data_ready = true;
+
+    ESP_LOGI(TAG, "SCD41 - CO2: %d ppm, Temp: %.1f°C, Humidity: %.1f%%",
+             data->co2_ppm, data->temperature, data->humidity);
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Sensor reading task
+ */
+static void sensor_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Sensor task started");
+
+    // Initialize SCD41
+    if (scd41_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize SCD41 sensor");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Start measurement
+    if (scd41_start_measurement() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start SCD41 measurement");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Wait for first measurement to be ready (SCD41 needs 5 seconds for first reading)
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
+    while (1) {
+        scd41_data_t new_data;
+        if (scd41_read_measurement(&new_data) == ESP_OK) {
+            // Update global sensor data
+            sensor_data = new_data;
+        } else {
+            ESP_LOGW(TAG, "Failed to read sensor data");
+            sensor_data.data_ready = false;
+        }
+
+        // SCD41 provides new data every 5 seconds
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+/**
  * @brief Main application entry point
  */
 void app_main(void)
@@ -520,7 +765,13 @@ void app_main(void)
     // Show initial test message
     display_text("SSD1306 Ready!", 0, 0);
     display_text("Starting WiFi...", 0, 16);
+    display_text("Init SCD41...", 0, 32);
+    update_display_changes();
     vTaskDelay(pdMS_TO_TICKS(2000)); // Show for 2 seconds
+
+    // Clear display before starting tasks
+    memset(frame_buffer, 0, SSD1306_WIDTH * SSD1306_HEIGHT / 8);
+    update_display_changes();
 
     // Initialize WiFi
     wifi_init_sta();
@@ -528,6 +779,7 @@ void app_main(void)
     // Create tasks
     xTaskCreate(led_task, "led_task", 2048, NULL, LED_TASK_PRIORITY, NULL);
     xTaskCreate(display_task, "display_task", 4096, NULL, DISPLAY_TASK_PRIORITY, NULL);
+    xTaskCreate(sensor_task, "sensor_task", 4096, NULL, SENSOR_TASK_PRIORITY, NULL);
 
     ESP_LOGI(TAG, "All tasks created successfully");
     ESP_LOGI(TAG, "Application initialization complete");

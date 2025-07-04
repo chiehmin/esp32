@@ -89,38 +89,6 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "scd41_temperature_celsius"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "celsius"
-              },
-              {
-                "id": "displayName",
-                "value": "Temperature (°C)"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "scd41_humidity_percent"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "displayName",
-                "value": "Humidity (%)"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "sgp30_tvoc_ppb"
             },
             "properties": [
@@ -164,55 +132,12 @@
                 }
               }
             ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sgp30_eco2_ppm"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "ppm"
-              },
-              {
-                "id": "displayName",
-                "value": "eCO2 (SGP30)"
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green"
-                    },
-                    {
-                      "color": "#96D98D",
-                      "value": 600
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 800
-                    },
-                    {
-                      "color": "orange",
-                      "value": 1000
-                    },
-                    {
-                      "color": "red",
-                      "value": 1400
-                    }
-                  ]
-                }
-              }
-            ]
           }
         ]
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 0
       },
@@ -249,9 +174,157 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "scd41_temperature_celsius{job=\"esp32_air_quality\"}",
-          "legendFormat": "Temperature (SCD41)",
+          "expr": "sgp30_tvoc_ppb{job=\"esp32_air_quality\"}",
+          "legendFormat": "TVOC (SGP30)",
           "refId": "B"
+        }
+      ],
+      "title": "Current Sensor Values - Air Quality",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Current temperature and humidity values",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "scd41_temperature_celsius"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "celsius"
+              },
+              {
+                "id": "displayName",
+                "value": "Temperature (°C)"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "blue"
+                    },
+                    {
+                      "color": "green",
+                      "value": 18
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 25
+                    },
+                    {
+                      "color": "orange",
+                      "value": 30
+                    },
+                    {
+                      "color": "red",
+                      "value": 35
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "scd41_humidity_percent"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "Humidity (%)"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "yellow"
+                    },
+                    {
+                      "color": "green",
+                      "value": 40
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 60
+                    },
+                    {
+                      "color": "orange",
+                      "value": 70
+                    },
+                    {
+                      "color": "red",
+                      "value": 80
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 10,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto",
+        "text": {}
+      },
+      "pluginVersion": "12.0.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "scd41_temperature_celsius{job=\"esp32_air_quality\"}",
+          "legendFormat": "Temperature (°C)",
+          "refId": "A"
         },
         {
           "datasource": {
@@ -259,29 +332,11 @@
             "uid": "prometheus"
           },
           "expr": "scd41_humidity_percent{job=\"esp32_air_quality\"}",
-          "legendFormat": "Humidity (SCD41)",
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sgp30_tvoc_ppb{job=\"esp32_air_quality\"}",
-          "legendFormat": "TVOC (SGP30)",
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sgp30_eco2_ppm{job=\"esp32_air_quality\"}",
-          "legendFormat": "eCO2 (SGP30)",
-          "refId": "E"
+          "legendFormat": "Humidity (%)",
+          "refId": "B"
         }
       ],
-      "title": "Current Sensor Values",
+      "title": "Current Sensor Values - Environment",
       "type": "gauge"
     },
     {
@@ -1056,5 +1111,5 @@
   "timezone": "",
   "title": "ESP32 Air Quality Monitor - SH1106 + SCD41 + SGP30",
   "uid": "esp32-sh1106-scd41-sgp30",
-  "version": 7
+  "version": 10
 }

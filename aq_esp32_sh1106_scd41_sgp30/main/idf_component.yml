@@ -1,0 +1,4 @@
+dependencies:
+  chiehmin/scd41: ^1.0.0
+  chiehmin/sgp30: ^1.0.0
+  tny-robotics/sh1106-esp-idf: '*'

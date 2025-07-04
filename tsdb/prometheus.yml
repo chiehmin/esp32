@@ -3,14 +3,8 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'esp32s3_air_quality'
+  - job_name: 'esp32_air_quality'
     static_configs:
-      - targets: ['192.168.0.18:80']  # ESP32S3 with SGP30/DHT11
-    metrics_path: '/metrics'
-    scheme: 'http'
-
-  - job_name: 'esp32_scd41_air_quality'
-    static_configs:
-      - targets: ['192.168.0.75:80']   # ESP32 with SCD41 sensor
+      - targets: ['192.168.0.75:80']
     metrics_path: '/metrics'
     scheme: 'http'

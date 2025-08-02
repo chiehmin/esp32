@@ -31,7 +31,8 @@ Device Addresses:
 ================
 - SH1106 OLED: 0x3C
 - SCD41 Sensor: 0x62
-- SGP30 Sensor: 0x58
+- SGP30 Sensor: 0x58 (alternative VOC sensor)
+- SGP40 Sensor: 0x59 (alternative VOC sensor)
 
 Notes:
 ======
@@ -41,6 +42,8 @@ Notes:
 4. The ESP32 has built-in pull-up resistors for I2C
 5. SCD41 requires 5 seconds for initial readings
 6. SGP30 needs 12+ hours for stable TVOC measurements
+7. SGP40 uses Gas Index Algorithm for VOC measurement (0-500 index)
+8. Only one VOC sensor should be connected at a time (SGP30 OR SGP40, not both)
 
 Sensor Specifications:
 =====================

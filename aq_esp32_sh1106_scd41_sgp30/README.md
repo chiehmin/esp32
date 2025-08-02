@@ -1,24 +1,26 @@
-# ESP32 Air Quality Monitor with SH1106, SCD41, and SGP30
+# ESP32 Air Quality Monitor with SH1106, SCD41, and VOC Sensors
 
 A comprehensive ESP32 air quality monitoring system that combines multiple sensors to provide real-time environmental data.
 
 ## Features
 
-- **Dual Sensor Setup**: 
+- **Multi-Sensor Setup**: 
   - SCD41 for accurate CO2, temperature, and humidity measurements
-  - SGP30 for TVOC (Total Volatile Organic Compounds) and equivalent CO2 measurements
+  - SGP30 for TVOC (Total Volatile Organic Compounds) and equivalent CO2 measurements OR
+  - SGP40 for VOC Index using Sensirion's Gas Index Algorithm (0-500 scale)
 - **SH1106 OLED Display**: Real-time sensor data visualization
 - **WiFi Connectivity**: Wireless network connection for remote monitoring
 - **HTTP Server**: Prometheus metrics endpoint for data collection
 - **LED Status Indicator**: Visual system status feedback
 - **FreeRTOS Tasks**: Multi-threaded operation for optimal performance
+- **Automatic Sensor Detection**: Automatically detects which VOC sensor is connected
 
 ## Hardware Requirements
 
 - ESP32 development board
 - SH1106 OLED display (128x64)
 - SCD41 CO2/Temperature/Humidity sensor
-- SGP30 TVOC/eCO2 sensor
+- SGP30 TVOC/eCO2 sensor **OR** SGP40 VOC Index sensor
 - Breadboard and jumper wires
 - USB cable for programming and power
 
@@ -34,6 +36,7 @@ A comprehensive ESP32 air quality monitoring system that combines multiple senso
 - SH1106 OLED: 0x3C
 - SCD41 Sensor: 0x62 (default)
 - SGP30 Sensor: 0x58 (default)
+- SGP40 Sensor: 0x59 (default)
 
 ## Sensor Specifications
 
@@ -48,6 +51,12 @@ A comprehensive ESP32 air quality monitoring system that combines multiple senso
 - eCO2 Range: 400-60,000 ppm
 - Update Rate: Every 1 second
 - Warm-up Time: ~12 hours for accurate readings
+
+### SGP40 (VOC Index)
+- VOC Index Range: 0-500 (100 = baseline, >100 = worse air quality)
+- Update Rate: Every 1 second
+- Temperature/Humidity compensation using SCD41 data
+- Uses Sensirion's Gas Index Algorithm for stable measurements
 
 ## Getting Started
 
@@ -92,6 +101,7 @@ After flashing and running:
 
 ## Display Layout
 
+**With SGP30:**
 ```
 Air Quality
 CO2: 450 ppm
@@ -99,10 +109,19 @@ T:23.5C H:45.2%
 TVOC: 125 ppb
 ```
 
+**With SGP40:**
+```
+Air Quality
+CO2: 450 ppm
+T:23.5C H:45.2%
+VOC: 120 idx
+```
+
 ## Prometheus Metrics
 
 Access metrics at `http://[ESP32_IP]/metrics`:
 
+**With SGP30:**
 ```
 # SCD41 Sensor Metrics
 scd41_temperature_celsius 23.50
@@ -112,6 +131,22 @@ scd41_co2_ppm 450
 # SGP30 Sensor Metrics
 sgp30_tvoc_ppb 125
 sgp30_eco2_ppm 465
+
+# System Metrics
+esp32_uptime_seconds 1234
+esp32_free_heap_bytes 245760
+```
+
+**With SGP40:**
+```
+# SCD41 Sensor Metrics
+scd41_temperature_celsius 23.50
+scd41_humidity_percent 45.20
+scd41_co2_ppm 450
+
+# SGP40 Sensor Metrics
+sgp40_voc_raw 32456
+sgp40_voc_index 120
 
 # System Metrics
 esp32_uptime_seconds 1234
@@ -130,6 +165,12 @@ esp32_free_heap_bytes 245760
 2. **Sensor Not Responding**:
    - SCD41: Allow 5 seconds for initial reading
    - SGP30: Allow 12+ hours for stable TVOC readings
+   - SGP40: Allow 45 seconds for Gas Index Algorithm initialization
+
+3. **VOC Sensor Selection**:
+   - Only connect one VOC sensor at a time (SGP30 OR SGP40)
+   - The system will automatically detect which sensor is connected
+   - Check I2C scan logs to verify sensor detection
 
 3. **Display Issues**:
    - Verify SH1106 I2C address (0x3C)

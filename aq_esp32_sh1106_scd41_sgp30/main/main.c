@@ -40,6 +40,8 @@
 /* Sensor driver includes */
 #include "scd41.h"
 #include "sgp30/sgp30.h"
+#include "sgp40.h"
+#include "sensirion_gas_index_algorithm.h"
 
 /* Display driver includes */
 #include "esp_lcd_panel_io.h"
@@ -92,6 +94,14 @@ static uint8_t *prev_frame_buffer = NULL;  // Previous frame for comparison
 
 /* Sensor data variables */
 static SemaphoreHandle_t sensor_mutex;
+
+// Sensor type enumeration
+typedef enum {
+    SENSOR_TYPE_NONE = 0,
+    SENSOR_TYPE_SGP30,
+    SENSOR_TYPE_SGP40
+} voc_sensor_type_t;
+
 static struct {
     // SCD41 data
     uint16_t scd41_co2_ppm;
@@ -99,10 +109,16 @@ static struct {
     float scd41_humidity;
     bool scd41_data_ready;
 
-    // SGP30 data
+    // VOC sensor data (SGP30 or SGP40)
+    voc_sensor_type_t voc_sensor_type;
     uint16_t sgp30_tvoc_ppb;
     uint16_t sgp30_eco2_ppm;
     bool sgp30_data_ready;
+
+    // SGP40 specific data
+    uint16_t sgp40_voc_raw;
+    int32_t sgp40_voc_index;
+    bool sgp40_data_ready;
 
     time_t last_update;
 } sensor_data = {0};
@@ -117,6 +133,7 @@ static void wifi_init_sta(void);
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 static void scd41_sensor_task(void *pvParameters);
 static void sgp30_sensor_task(void *pvParameters);
+static void sgp40_sensor_task(void *pvParameters);
 static esp_err_t metrics_get_handler(httpd_req_t *req);
 static httpd_handle_t start_webserver(void);
 
@@ -201,12 +218,14 @@ static void display_task(void *pvParameters)
             }
             display_text(line_buffer, 0, 32);
 
-            // Line 4: SGP30 TVOC
+            // Line 4: VOC data (SGP30 or SGP40)
             clear_line(48);
-            if (sensor_data.sgp30_data_ready) {
+            if (sensor_data.voc_sensor_type == SENSOR_TYPE_SGP30 && sensor_data.sgp30_data_ready) {
                 snprintf(line_buffer, sizeof(line_buffer), "TVOC: %d ppb", sensor_data.sgp30_tvoc_ppb);
+            } else if (sensor_data.voc_sensor_type == SENSOR_TYPE_SGP40 && sensor_data.sgp40_data_ready) {
+                snprintf(line_buffer, sizeof(line_buffer), "VOC: %ld idx", sensor_data.sgp40_voc_index);
             } else {
-                snprintf(line_buffer, sizeof(line_buffer), "TVOC: --- ppb");
+                snprintf(line_buffer, sizeof(line_buffer), "VOC: --- ---");
             }
             display_text(line_buffer, 0, 48);
 
@@ -724,6 +743,74 @@ static void sgp30_sensor_task(void *pvParameters)
 }
 
 /**
+ * @brief SGP40 sensor reading task
+ */
+static void sgp40_sensor_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "SGP40 sensor task started");
+
+    // Initialize SGP40
+    static sgp40_t sgp40;
+
+    if (sgp40_init(&sgp40, I2C_MASTER_NUM) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize SGP40 sensor - sensor may not be connected");
+        ESP_LOGI(TAG, "SGP40 task will continue but sensor data will be marked as unavailable");
+
+        // Mark SGP40 as unavailable and keep task running
+        while (1) {
+            if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                sensor_data.sgp40_data_ready = false;
+                xSemaphoreGive(sensor_mutex);
+            }
+            vTaskDelay(pdMS_TO_TICKS(5000)); // Check every 5 seconds
+        }
+    }
+
+    ESP_LOGI(TAG, "SGP40 initialized successfully");
+
+    // Give the Gas Index Algorithm some time to stabilize (45 seconds initial blackout)
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    while (1) {
+        // Get temperature and humidity for compensation from SCD41 if available
+        float temperature = 25.0f;  // Default values
+        float humidity = 50.0f;
+
+        if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            if (sensor_data.scd41_data_ready) {
+                temperature = sensor_data.scd41_temperature;
+                humidity = sensor_data.scd41_humidity;
+            }
+            xSemaphoreGive(sensor_mutex);
+        }
+
+        // Measure VOC with temperature and humidity compensation
+        if (sgp40_measure_voc(&sgp40, I2C_MASTER_NUM, temperature, humidity) == ESP_OK) {
+            // Update global sensor data
+            if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                sensor_data.sgp40_voc_raw = sgp40_get_voc_raw(&sgp40);
+                sensor_data.sgp40_voc_index = sgp40_get_voc_index(&sgp40);
+                sensor_data.sgp40_data_ready = true;
+                sensor_data.last_update = time(NULL);
+                xSemaphoreGive(sensor_mutex);
+            }
+
+            ESP_LOGD(TAG, "SGP40: VOC Raw=%d, VOC Index=%ld",
+                    sensor_data.sgp40_voc_raw, sensor_data.sgp40_voc_index);
+        } else {
+            ESP_LOGW(TAG, "Failed to read SGP40 sensor data");
+            if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                sensor_data.sgp40_data_ready = false;
+                xSemaphoreGive(sensor_mutex);
+            }
+        }
+
+        // SGP40 measurement interval should be 1 second for Gas Index Algorithm
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+/**
  * @brief HTTP handler for /metrics endpoint
  *
  * Formats current sensor data in Prometheus text format
@@ -734,7 +821,7 @@ static esp_err_t metrics_get_handler(httpd_req_t *req)
     int len = 0;
 
     if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        // Format metrics in Prometheus text format
+        // Start with common SCD41 metrics
         len = snprintf(resp_str, sizeof(resp_str),
             "# HELP scd41_temperature_celsius Temperature in Celsius from SCD41 sensor\n"
             "# TYPE scd41_temperature_celsius gauge\n"
@@ -744,27 +831,49 @@ static esp_err_t metrics_get_handler(httpd_req_t *req)
             "scd41_humidity_percent %.2f\n"
             "# HELP scd41_co2_ppm CO2 concentration in ppm from SCD41 sensor\n"
             "# TYPE scd41_co2_ppm gauge\n"
-            "scd41_co2_ppm %" PRIu16 "\n"
-            "# HELP sgp30_tvoc_ppb TVOC concentration in ppb from SGP30 sensor\n"
-            "# TYPE sgp30_tvoc_ppb gauge\n"
-            "sgp30_tvoc_ppb %" PRIu16 "\n"
-            "# HELP sgp30_eco2_ppm Equivalent CO2 concentration in ppm from SGP30 sensor\n"
-            "# TYPE sgp30_eco2_ppm gauge\n"
-            "sgp30_eco2_ppm %" PRIu16 "\n"
+            "scd41_co2_ppm %" PRIu16 "\n",
+            sensor_data.scd41_temperature,
+            sensor_data.scd41_humidity,
+            sensor_data.scd41_co2_ppm
+        );
+
+        // Add VOC sensor specific metrics
+        if (sensor_data.voc_sensor_type == SENSOR_TYPE_SGP30 && sensor_data.sgp30_data_ready) {
+            len += snprintf(resp_str + len, sizeof(resp_str) - len,
+                "# HELP sgp30_tvoc_ppb TVOC concentration in ppb from SGP30 sensor\n"
+                "# TYPE sgp30_tvoc_ppb gauge\n"
+                "sgp30_tvoc_ppb %" PRIu16 "\n"
+                "# HELP sgp30_eco2_ppm Equivalent CO2 concentration in ppm from SGP30 sensor\n"
+                "# TYPE sgp30_eco2_ppm gauge\n"
+                "sgp30_eco2_ppm %" PRIu16 "\n",
+                sensor_data.sgp30_tvoc_ppb,
+                sensor_data.sgp30_eco2_ppm
+            );
+        } else if (sensor_data.voc_sensor_type == SENSOR_TYPE_SGP40 && sensor_data.sgp40_data_ready) {
+            len += snprintf(resp_str + len, sizeof(resp_str) - len,
+                "# HELP sgp40_voc_raw Raw VOC signal from SGP40 sensor\n"
+                "# TYPE sgp40_voc_raw gauge\n"
+                "sgp40_voc_raw %" PRIu16 "\n"
+                "# HELP sgp40_voc_index VOC index from SGP40 sensor (0-500)\n"
+                "# TYPE sgp40_voc_index gauge\n"
+                "sgp40_voc_index %" PRId32 "\n",
+                sensor_data.sgp40_voc_raw,
+                sensor_data.sgp40_voc_index
+            );
+        }
+
+        // Add system metrics
+        len += snprintf(resp_str + len, sizeof(resp_str) - len,
             "# HELP esp32_uptime_seconds ESP32 uptime in seconds\n"
             "# TYPE esp32_uptime_seconds counter\n"
             "esp32_uptime_seconds %llu\n"
             "# HELP esp32_free_heap_bytes Free heap memory in bytes\n"
             "# TYPE esp32_free_heap_bytes gauge\n"
             "esp32_free_heap_bytes %" PRIu32 "\n",
-            sensor_data.scd41_temperature,
-            sensor_data.scd41_humidity,
-            sensor_data.scd41_co2_ppm,
-            sensor_data.sgp30_tvoc_ppb,
-            sensor_data.sgp30_eco2_ppm,
             esp_timer_get_time() / 1000000ULL,
             esp_get_free_heap_size()
         );
+
         xSemaphoreGive(sensor_mutex);
     } else {
         len = snprintf(resp_str, sizeof(resp_str), "# Error: Could not read sensor data\n");
@@ -816,6 +925,7 @@ static void i2c_scan(void)
     bool sh1106_found = false;
     bool scd41_found = false;
     bool sgp30_found = false;
+    bool sgp40_found = false;
 
     for (uint8_t i = 1; i < 127; i++) {
         i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -836,6 +946,9 @@ static void i2c_scan(void)
             } else if (i == 0x58) {
                 device_name = "SGP30 Sensor";
                 sgp30_found = true;
+            } else if (i == 0x59) {
+                device_name = "SGP40 Sensor";
+                sgp40_found = true;
             }
             ESP_LOGI(TAG, "Found I2C device at address 0x%02x (%s)", i, device_name);
             device_found = true;
@@ -856,8 +969,16 @@ static void i2c_scan(void)
         if (!scd41_found) {
             ESP_LOGW(TAG, "SCD41 Sensor (0x62) not found - CO2/temp/humidity data will be unavailable");
         }
-        if (!sgp30_found) {
-            ESP_LOGW(TAG, "SGP30 Sensor (0x58) not found - TVOC/eCO2 data will be unavailable");
+        if (!sgp30_found && !sgp40_found) {
+            ESP_LOGW(TAG, "Neither SGP30 (0x58) nor SGP40 (0x59) found - VOC data will be unavailable");
+        } else if (sgp30_found && sgp40_found) {
+            ESP_LOGW(TAG, "Both SGP30 and SGP40 detected - this should not happen");
+        } else if (sgp30_found) {
+            ESP_LOGI(TAG, "SGP30 sensor detected - TVOC/eCO2 data will be available");
+            sensor_data.voc_sensor_type = SENSOR_TYPE_SGP30;
+        } else if (sgp40_found) {
+            ESP_LOGI(TAG, "SGP40 sensor detected - VOC index data will be available");
+            sensor_data.voc_sensor_type = SENSOR_TYPE_SGP40;
         }
     }
 
@@ -916,7 +1037,13 @@ void app_main(void)
         xTaskCreate(display_task, "display_task", 4096, NULL, DISPLAY_TASK_PRIORITY, NULL);
     }
     xTaskCreate(scd41_sensor_task, "scd41_task", 4096, NULL, SENSOR_TASK_PRIORITY, NULL);
-    xTaskCreate(sgp30_sensor_task, "sgp30_task", 4096, NULL, SENSOR_TASK_PRIORITY, NULL);
+
+    // Create VOC sensor task based on detected sensor type
+    if (sensor_data.voc_sensor_type == SENSOR_TYPE_SGP30) {
+        xTaskCreate(sgp30_sensor_task, "sgp30_task", 4096, NULL, SENSOR_TASK_PRIORITY, NULL);
+    } else if (sensor_data.voc_sensor_type == SENSOR_TYPE_SGP40) {
+        xTaskCreate(sgp40_sensor_task, "sgp40_task", 4096, NULL, SENSOR_TASK_PRIORITY, NULL);
+        }
 
     ESP_LOGI(TAG, "All tasks created successfully");
     ESP_LOGI(TAG, "Application initialization complete");

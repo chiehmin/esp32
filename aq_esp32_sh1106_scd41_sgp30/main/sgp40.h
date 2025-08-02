@@ -27,9 +27,10 @@ extern "C" {
 #define SGP40_CMD_GET_SERIAL_NUMBER     0x3682
 
 // SGP40 timing constants
-#define SGP40_MEASURE_DELAY_MS          30
-#define SGP40_SELFTEST_DELAY_MS         320
-#define SGP40_SERIAL_DELAY_MS           1
+#define SGP40_MEASURE_DELAY_MS          100  // Increased to 100ms for better reliability
+#define SGP40_SELFTEST_DELAY_MS         350  // Increased from 320ms  
+#define SGP40_SERIAL_DELAY_MS           10   // Increased from 1ms0  // Increased for better reliability
+#define SGP40_WARMUP_DELAY_MS           1000
 
 // SGP40 data structure
 typedef struct {
@@ -101,6 +102,14 @@ uint16_t sgp40_get_voc_raw(sgp40_t *sgp40);
  * @return ESP_OK on success, ESP_FAIL on error
  */
 esp_err_t sgp40_turn_heater_off(int i2c_num);
+
+/**
+ * @brief Check if SGP40 is ready to send data
+ *
+ * @param i2c_num I2C port number
+ * @return true if device is ready, false otherwise
+ */
+bool sgp40_is_data_ready(int i2c_num);
 
 #ifdef __cplusplus
 }

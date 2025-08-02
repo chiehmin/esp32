@@ -752,6 +752,9 @@ static void sgp40_sensor_task(void *pvParameters)
     // Initialize SGP40
     static sgp40_t sgp40;
 
+    // Add a brief delay to let I2C bus stabilize
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     if (sgp40_init(&sgp40, I2C_MASTER_NUM) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize SGP40 sensor - sensor may not be connected");
         ESP_LOGI(TAG, "SGP40 task will continue but sensor data will be marked as unavailable");
@@ -769,6 +772,7 @@ static void sgp40_sensor_task(void *pvParameters)
     ESP_LOGI(TAG, "SGP40 initialized successfully");
 
     // Give the Gas Index Algorithm some time to stabilize (45 seconds initial blackout)
+    // But start with a shorter delay for initial testing
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     while (1) {
@@ -785,7 +789,8 @@ static void sgp40_sensor_task(void *pvParameters)
         }
 
         // Measure VOC with temperature and humidity compensation
-        if (sgp40_measure_voc(&sgp40, I2C_MASTER_NUM, temperature, humidity) == ESP_OK) {
+        esp_err_t measure_result = sgp40_measure_voc(&sgp40, I2C_MASTER_NUM, temperature, humidity);
+        if (measure_result == ESP_OK) {
             // Update global sensor data
             if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 sensor_data.sgp40_voc_raw = sgp40_get_voc_raw(&sgp40);
@@ -795,10 +800,10 @@ static void sgp40_sensor_task(void *pvParameters)
                 xSemaphoreGive(sensor_mutex);
             }
 
-            ESP_LOGD(TAG, "SGP40: VOC Raw=%d, VOC Index=%ld",
-                    sensor_data.sgp40_voc_raw, sensor_data.sgp40_voc_index);
+            ESP_LOGI(TAG, "SGP40: VOC Raw=%d, VOC Index=%ld (T=%.1f°C, H=%.1f%%)",
+                    sensor_data.sgp40_voc_raw, sensor_data.sgp40_voc_index, temperature, humidity);
         } else {
-            ESP_LOGW(TAG, "Failed to read SGP40 sensor data");
+            ESP_LOGW(TAG, "Failed to read SGP40 sensor data: %s", esp_err_to_name(measure_result));
             if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 sensor_data.sgp40_data_ready = false;
                 xSemaphoreGive(sensor_mutex);
@@ -1043,7 +1048,7 @@ void app_main(void)
         xTaskCreate(sgp30_sensor_task, "sgp30_task", 4096, NULL, SENSOR_TASK_PRIORITY, NULL);
     } else if (sensor_data.voc_sensor_type == SENSOR_TYPE_SGP40) {
         xTaskCreate(sgp40_sensor_task, "sgp40_task", 4096, NULL, SENSOR_TASK_PRIORITY, NULL);
-        }
+    }
 
     ESP_LOGI(TAG, "All tasks created successfully");
     ESP_LOGI(TAG, "Application initialization complete");
